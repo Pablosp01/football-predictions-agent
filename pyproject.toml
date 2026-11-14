@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "football-agent"
+version = "0.1.0"
+description = "Accurate football predictions agent: Elo + Dixon-Coles Poisson model, walk-forward backtesting, CLI."
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.12"
+dependencies = [
+    "pandas==2.2.2",
+    "numpy==1.26.4",
+    "scikit-learn==1.5.2",
+    "requests==2.32.3",
+]
+
+[project.scripts]
+football-predict = "football_agent.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
