@@ -1,0 +1,216 @@
+openapi: 3.1.0
+info:
+  title: Football Predictions Agent API
+  version: 0.1.0
+  description: |
+    Predictions from Vincent's own model: Elo ratings + a Dixon-Coles Poisson
+    goal model, blended with recent form, head-to-head and rest days, and
+    validated by walk-forward backtesting. The numbers this API returns —
+    probabilities, expected goals, scorelines — are AUTHORITATIVE. A GPT
+    using this action must present those numbers as the prediction and must
+    never replace them with its own guess, and must never present a
+    prediction without calling this API first.
+servers:
+  - url: "{BASE_URL}"
+    description: Your deployed API URL — replace {BASE_URL} with it (no trailing slash)
+    variables:
+      BASE_URL:
+        default: https://REPLACE-WITH-YOUR-DEPLOYED-URL
+        description: Public URL of the deployed API, e.g. https://football-predictions-agent.onrender.com
+paths:
+  /health:
+    get:
+      operationId: health
+      summary: Check the API and model are up
+      responses:
+        "200":
+          description: API is up
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string, example: ok }
+                  model: { type: string, example: "Elo + Dixon-Coles Poisson" }
+                  leagues: { type: array, items: { type: string }, example: ["PL", "PD", "SA", "BL1", "FL1", "CL"] }
+  /predict:
+    post:
+      operationId: predictMatch
+      summary: Predict one match with the model — ALWAYS call this before answering a prediction request
+      description: |
+        Returns the model's home/draw/away probabilities, expected goals,
+        most likely scoreline, top-5 scorelines, BTTS and over/under 2.5
+        probabilities, confidence and the top driving factors. These numbers
+        are the prediction. Team names are fuzzy-matched ("Man Utd",
+        "Man United", "Spurs" all work); an unknown name returns a 400 with
+        "did you mean" suggestions — use one of those and call again.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [home_team, away_team]
+              properties:
+                home_team: { type: string, example: Arsenal }
+                away_team: { type: string, example: Chelsea }
+                league: { type: string, default: PL, example: PL, description: "PL, PD (La Liga), SA (Serie A), BL1 (Bundesliga), FL1 (Ligue 1), CL (Champions League). Sample data only covers PL without a live data key." }
+      responses:
+        "200":
+          description: Model prediction
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Prediction" }
+        "400":
+          description: Unknown team (see did_you_mean) or same team twice
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  detail:
+                    type: object
+                    properties:
+                      error: { type: string }
+                      did_you_mean: { type: array, items: { type: string } }
+                      known_teams: { type: array, items: { type: string } }
+  /predict-batch:
+    post:
+      operationId: predictBatch
+      summary: Predict several fixtures at once, ranked by confidence
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [fixtures]
+              properties:
+                league: { type: string, default: PL }
+                fixtures:
+                  type: array
+                  maxItems: 50
+                  items:
+                    type: object
+                    required: [home_team, away_team]
+                    properties:
+                      home_team: { type: string, example: Arsenal }
+                      away_team: { type: string, example: Chelsea }
+      responses:
+        "200":
+          description: Ranked predictions
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  league: { type: string }
+                  count: { type: integer }
+                  predictions:
+                    type: array
+                    items:
+                      allOf:
+                        - $ref: "#/components/schemas/Prediction"
+                        - type: object
+                          properties:
+                            rank: { type: integer }
+  /fixtures:
+    get:
+      operationId: getFixtures
+      summary: Fixtures on a date, each with a model prediction
+      description: |
+        With a live football-data.org key configured on the server this
+        returns real upcoming fixtures. Without one it returns an empty list
+        with a message explaining the sample data has no future fixtures.
+      parameters:
+        - name: league
+          in: query
+          schema: { type: string, default: PL }
+        - name: date
+          in: query
+          schema: { type: string, format: date, example: "2026-11-15" }
+      responses:
+        "200":
+          description: Fixtures with predictions (or an empty list + message)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  league: { type: string }
+                  date: { type: string, nullable: true }
+                  message: { type: string }
+                  fixtures:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        date: { type: string }
+                        home_team: { type: string }
+                        away_team: { type: string }
+                        prediction: { $ref: "#/components/schemas/Prediction" }
+  /backtest:
+    get:
+      operationId: getBacktest
+      summary: How accurate the model has been (walk-forward backtest)
+      description: |
+        Walk-forward, expanding-window evaluation with no look-ahead. Judge
+        the model on Brier score / log loss, not raw accuracy alone.
+      parameters:
+        - name: league
+          in: query
+          schema: { type: string, default: PL }
+      responses:
+        "200":
+          description: Backtest metrics
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  league: { type: string }
+                  accuracy: { type: number, example: 0.634 }
+                  brier: { type: number, example: 0.4706, description: "Lower is better; 0.667 = always predicting 1/3 each" }
+                  log_loss: { type: number, example: 0.8194 }
+                  n_matches: { type: integer, example: 380 }
+                  home_win_rate: { type: number }
+                  roi: { type: number, nullable: true }
+components:
+  schemas:
+    Prediction:
+      type: object
+      properties:
+        home_team: { type: string, example: Arsenal }
+        away_team: { type: string, example: Chelsea }
+        league: { type: string, example: PL }
+        p_home: { type: number, example: 0.476, description: "Model probability of a home win" }
+        p_draw: { type: number, example: 0.274 }
+        p_away: { type: number, example: 0.25 }
+        xg_home: { type: number, example: 1.55, description: "Model expected goals, home team" }
+        xg_away: { type: number, example: 1.06 }
+        most_likely: { type: string, enum: [H, D, A], example: H }
+        confidence: { type: number, example: 0.476, description: "Probability of the most likely outcome" }
+        top_scorelines:
+          type: array
+          items:
+            type: object
+            properties:
+              score: { type: string, example: "1-1" }
+              prob: { type: number, example: 0.133 }
+        p_btts: { type: number, example: 0.525, description: "Both teams to score" }
+        p_over_25: { type: number, example: 0.483, description: "Over 2.5 total goals" }
+        factors:
+          type: array
+          items: { type: string }
+          description: Top driving factors (form, Elo, head-to-head, rest)
+        source: { type: string, example: model }
+        disclaimer: { type: string }
+  securitySchemes:
+    ApiKeyAuth:
+      type: apiKey
+      in: header
+      name: X-API-Key
+      description: |
+        Only needed if the API owner set the API_KEY environment variable on
+        the server. If it is set, send it on every call except /health.
+        If it is not set, do not send the header.

@@ -1,0 +1,18 @@
+# Deploy the API on Render's free tier: push to GitHub, then in Render
+# Dashboard -> New -> Blueprint, point it at this repo. Render reads
+# this file, builds the service and gives it a public URL
+# (https://football-predictions-agent.onrender.com or similar).
+# Copy that URL into the ChatGPT Action (see chatgpt/README.md).
+services:
+  - type: web
+    name: football-predictions-agent
+    env: python
+    plan: free
+    buildCommand: pip install -r requirements.txt && pip install -e .
+    startCommand: uvicorn football_agent.api:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /health
+    envVars:
+      - key: FOOTBALL_DATA_API_KEY
+        sync: false
+      - key: API_KEY
+        sync: false

@@ -32,6 +32,30 @@ Or install the entry point: `pip install -e .` then use `football-predict`.
 | `football-predict fetch --league PL` | Fetch live data (needs API key) |
 | `football-predict agent --home Arsenal Liverpool --away Chelsea "Man City"` | Rank fixtures, write `output/predictions.csv` + `output/predictions.md` |
 
+## Connect to ChatGPT
+
+Give ChatGPT your team names and get a prediction **from this model**,
+not from ChatGPT guessing: deploy the FastAPI wrapper, create a Custom
+GPT, and add it as an Action. Full non-technical steps:
+[`chatgpt/README.md`](chatgpt/README.md).
+
+```bash
+pip install -r requirements.txt
+uvicorn football_agent.api:app --reload   # or: python -m football_agent.api
+curl localhost:8000/health
+curl -X POST localhost:8000/predict \
+  -H "Content-Type: application/json" \
+  -d '{"home_team": "Arsenal", "away_team": "Chelsea"}'
+```
+
+Endpoints: `GET /health`, `POST /predict`, `POST /predict-batch`,
+`GET /fixtures?league=PL&date=2026-11-15`, `GET /backtest?league=PL`.
+Team names are fuzzy-matched ("Man Utd", "Spurs" work); an unknown name
+returns 400 with "did you mean" suggestions. The fitted model is cached
+per league. If `API_KEY` is set, every endpoint except `/health` requires
+an `X-API-Key` header. Deploy free on Render with the included
+`render.yaml`, or with the included `Dockerfile`.
+
 ## How accuracy is measured
 
 `backtest` uses **walk-forward, expanding-window** evaluation: for each match
@@ -103,6 +127,10 @@ src/football_agent/
   backtest.py  walk-forward evaluation
   agent.py     rank fixtures -> predictions.csv / predictions.md
   cli.py       football-predict entry point
+  api.py       FastAPI wrapper for ChatGPT (see "Connect to ChatGPT")
+chatgpt/     openapi.yaml, gpt-instructions.md, README.md (Custom GPT setup)
+render.yaml  free Render deploy for the API
+Dockerfile   container deploy for the API
 data/sample/pl_matches.csv   bundled offline dataset (480 matches)
 tests/       pytest: Elo, Poisson, Dixon-Coles, no-leakage backtest, CLI smoke
 ```
