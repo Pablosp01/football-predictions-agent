@@ -14,9 +14,11 @@ import difflib
 import os
 import re
 from datetime import date as _date
+from pathlib import Path
 from typing import Annotated
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query
+from fastapi.responses import FileResponse, PlainTextResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
@@ -251,6 +253,25 @@ app.add_middleware(
 @app.get("/health")
 def health() -> dict:
     return {"status": "ok", "model": MODEL_NAME, "leagues": LEAGUES}
+
+
+STATIC_DIR = Path(__file__).resolve().parent / "static"
+INDEX_HTML = STATIC_DIR / "index.html"
+
+
+@app.get("/", response_class=FileResponse)
+def web_chat():
+    """Free web chat page: type two teams, get a model prediction.
+
+    Served from the same app, so it works at / on Render and locally.
+    No ChatGPT plan needed.
+    """
+    if INDEX_HTML.is_file():
+        return FileResponse(INDEX_HTML, media_type="text/html")
+    return PlainTextResponse(
+        "Football Predictions Agent — web page file is missing. "
+        "The API still works: GET /health, POST /predict.",
+        status_code=200, media_type="text/plain")
 
 
 @app.post("/predict", response_model=PredictionOut,

@@ -56,6 +56,26 @@ per league. If `API_KEY` is set, every endpoint except `/health` requires
 an `X-API-Key` header. Deploy free on Render with the included
 `render.yaml`, or with the included `Dockerfile`.
 
+## Web chat page (free, no ChatGPT plan needed)
+
+If your ChatGPT account can't create Custom GPTs, use the web chat page
+served by the same API — type two team names and get the model's
+prediction straight away:
+
+- Live: **https://football-predictions-agent-agk8.onrender.com/**
+- Locally: `uvicorn football_agent.api:app` then open
+  http://localhost:8000/
+
+The page is a chat: it shows a "waking the model up…" state, calls
+`GET /health` first to wake the free host, then `POST /predict`, and
+renders the reply as a chat bubble with win/draw/away % bars, expected
+goals, most likely outcome + confidence, top-5 scorelines, BTTS and
+over/under 2.5, and the model's factors. Unknown team names show the
+"did you mean" suggestions as clickable chips; timeouts offer a Retry
+button. On Render's free plan the first request after idle can take
+50–90s while the service wakes; once warm, predictions take a few
+seconds.
+
 ## How accuracy is measured
 
 `backtest` uses **walk-forward, expanding-window** evaluation: for each match
@@ -128,11 +148,12 @@ src/football_agent/
   agent.py     rank fixtures -> predictions.csv / predictions.md
   cli.py       football-predict entry point
   api.py       FastAPI wrapper for ChatGPT (see "Connect to ChatGPT")
+  static/index.html  free web chat page served at GET / (no ChatGPT needed)
 chatgpt/     openapi.yaml, gpt-instructions.md, README.md (Custom GPT setup)
 render.yaml  free Render deploy for the API
 Dockerfile   container deploy for the API
 data/sample/pl_matches.csv   bundled offline dataset (480 matches)
-tests/       pytest: Elo, Poisson, Dixon-Coles, no-leakage backtest, CLI smoke
+tests/       pytest: Elo, Poisson, Dixon-Coles, no-leakage backtest, CLI smoke, API, web page
 ```
 
 ## License

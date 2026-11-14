@@ -1,0 +1,281 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Football Predictions Agent</title>
+<style>
+  :root { --bg: #0b1220; --panel: #111c2e; --panel-2: #16263d; --ink: #e8eef7;
+          --muted: #9db0c8; --green: #22c55e; --green-dark: #16a34a;
+          --user: #1d4ed8; --bubble: #16263d; --warn: #f59e0b; --bad: #ef4444; }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--ink);
+         font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  .wrap { max-width: 720px; margin: 0 auto; padding: 16px 12px 24px; }
+  header { text-align: center; padding: 8px 0 4px; }
+  header h1 { margin: 0; font-size: 1.5rem; }
+  header h1 span { color: var(--green); }
+  header p { margin: 6px 0 0; color: var(--muted); font-size: .9rem; }
+  #chat-log { display: flex; flex-direction: column; gap: 10px; margin: 16px 0; }
+  .msg { max-width: 92%; padding: 10px 12px; border-radius: 14px; line-height: 1.45;
+         font-size: .95rem; white-space: normal; }
+  .msg.user { align-self: flex-end; background: var(--user); }
+  .msg.agent { align-self: flex-start; background: var(--bubble); }
+  .msg.status { align-self: flex-start; background: transparent; color: var(--muted);
+                font-style: italic; padding: 4px 6px; }
+  .msg.error { align-self: flex-start; background: #3a1620; border: 1px solid var(--bad); }
+  .msg h3 { margin: 2px 0 6px; font-size: 1.05rem; }
+  .msg .sub { color: var(--muted); font-size: .85rem; margin: 2px 0 8px; }
+  .bar-row { display: grid; grid-template-columns: 74px 1fr 52px; gap: 8px;
+             align-items: center; margin: 4px 0; font-size: .9rem; }
+  .bar { height: 10px; background: #0b1220; border-radius: 6px; overflow: hidden; }
+  .bar > div { height: 100%; background: var(--green); border-radius: 6px; }
+  .facts { margin: 8px 0; font-size: .92rem; }
+  .facts b { color: var(--green); }
+  .scores { list-style: none; padding: 0; margin: 6px 0; font-size: .92rem; }
+  .scores li { display: flex; justify-content: space-between; padding: 2px 0;
+               border-bottom: 1px dashed #24365a; }
+  .factors { margin: 8px 0 2px; padding-left: 18px; font-size: .9rem; color: var(--muted); }
+  .disclaimer { font-size: .78rem; color: var(--muted); margin-top: 10px; }
+  .chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+  .chip { background: var(--panel-2); border: 1px solid #2b4365; color: var(--ink);
+          border-radius: 999px; padding: 5px 10px; font-size: .82rem; cursor: pointer; }
+  .chip:hover { border-color: var(--green); }
+  .examples { display: flex; flex-wrap: wrap; gap: 6px; margin: 0 0 10px; }
+  .examples span { color: var(--muted); font-size: .85rem; align-self: center; }
+  form#predict-form { display: grid; grid-template-columns: 1fr 1fr auto; gap: 8px;
+                      background: var(--panel); padding: 10px; border-radius: 12px; }
+  form#predict-form input, form#predict-form select {
+    padding: 10px; border-radius: 8px; border: 1px solid #2b4365;
+    background: var(--bg); color: var(--ink); font-size: 1rem; min-width: 0; }
+  form#predict-form button {
+    padding: 10px 16px; border: 0; border-radius: 8px; cursor: pointer;
+    background: var(--green); color: #06130a; font-weight: 700; font-size: 1rem; }
+  form#predict-form button:disabled { opacity: .55; cursor: wait; }
+  .row2 { grid-column: 1 / -1; display: flex; gap: 8px; align-items: center; }
+  .row2 select { flex: 1; }
+  form#predict-form .row2 button.secondary { background: transparent; color: var(--muted);
+    border: 1px solid #2b4365; font-weight: 400; }
+  .note { grid-column: 1 / -1; color: var(--muted); font-size: .8rem; margin: 0; }
+  @media (max-width: 560px) {
+    form#predict-form { grid-template-columns: 1fr; }
+    .row2 { flex-wrap: wrap; }
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>⚽ Football <span>Predictions</span> Agent</h1>
+    <p>Elo + Dixon-Coles Poisson model — type two teams, get the model's prediction.</p>
+  </header>
+
+  <div id="chat-log" aria-live="polite"></div>
+
+  <div class="examples" id="example-chips">
+    <span>Try:</span>
+    <button type="button" class="chip" data-home="Arsenal" data-away="Chelsea">Arsenal vs Chelsea</button>
+    <button type="button" class="chip" data-home="Man Utd" data-away="Liverpool">Man Utd vs Liverpool</button>
+    <button type="button" class="chip" data-home="Liverpool" data-away="Man City">Liverpool vs Man City</button>
+  </div>
+
+  <form id="predict-form">
+    <input id="home-input" type="text" placeholder="Home team" autocomplete="off" required>
+    <input id="away-input" type="text" placeholder="Away team" autocomplete="off" required>
+    <button id="predict-button" type="submit">Predict</button>
+    <div class="row2">
+      <select id="league-select" aria-label="League">
+        <option value="PL" selected>Premier League (PL)</option>
+        <option value="PD">La Liga (PD)</option>
+        <option value="SA">Serie A (SA)</option>
+        <option value="BL1">Bundesliga (BL1)</option>
+        <option value="FL1">Ligue 1 (FL1)</option>
+        <option value="CL">Champions League (CL)</option>
+      </select>
+      <button type="button" class="secondary" id="clear-button">Clear chat</button>
+    </div>
+    <p class="note">Only the Premier League works without a data key — other leagues need
+      FOOTBALL_DATA_API_KEY set on the server. The free host sleeps when idle, so the
+      first prediction can take up to a minute while it wakes up.</p>
+  </form>
+</div>
+
+<script>
+(function () {
+  "use strict";
+  var log = document.getElementById("chat-log");
+  var form = document.getElementById("predict-form");
+  var homeInput = document.getElementById("home-input");
+  var awayInput = document.getElementById("away-input");
+  var leagueSelect = document.getElementById("league-select");
+  var predictButton = document.getElementById("predict-button");
+  var lastRequest = null;
+
+  function esc(s) {
+    return String(s).replace(/[&<>"']/g, function (c) {
+      return {"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"}[c];
+    });
+  }
+  function pct(v) { return (v * 100).toFixed(1) + "%"; }
+
+  function addMsg(cls, html) {
+    var div = document.createElement("div");
+    div.className = "msg " + cls;
+    div.innerHTML = html;
+    log.appendChild(div);
+    div.scrollIntoView({ block: "nearest" });
+    return div;
+  }
+  function addStatus(text) {
+    return addMsg("status", esc(text));
+  }
+
+  // Intro message from the agent.
+  addMsg("agent",
+    "<b>Hi — I predict matches from results data, not guesswork.</b><br>" +
+    "Type a home team and an away team below (nicknames work: “Man Utd”, “Spurs”). " +
+    "I’ll wake the model, then show you the win / draw / away percentages, expected goals " +
+    "and the most likely scorelines.");
+
+  function norm(s) { return String(s).trim().toLowerCase(); }
+
+  function renderPrediction(d) {
+    var pickName = d.most_likely === "H" ? d.home_team
+      : d.most_likely === "A" ? d.away_team : "Draw";
+    var rows = [
+      ["Home win", d.p_home], ["Draw", d.p_draw], ["Away win", d.p_away]
+    ].map(function (r) {
+      return '<div class="bar-row"><span>' + esc(r[0]) + '</span>' +
+        '<div class="bar"><div style="width:' + (r[1] * 100).toFixed(1) + '%"></div></div>' +
+        '<span>' + pct(r[1]) + '</span></div>';
+    }).join("");
+    var scores = d.top_scorelines.map(function (s) {
+      return "<li><span>" + esc(s.score) + "</span><span>" + pct(s.prob) + "</span></li>";
+    }).join("");
+    var factors = (d.factors || []).map(function (f) {
+      return "<li>" + esc(f) + "</li>";
+    }).join("");
+    return "<h3>" + esc(d.home_team) + " vs " + esc(d.away_team) + "</h3>" +
+      '<div class="sub">' + esc(d.league) + " — most likely: <b>" + esc(pickName) +
+      "</b> (" + pct(d.confidence) + " confidence)</div>" +
+      rows +
+      '<div class="facts">Expected goals: <b>' + d.xg_home.toFixed(2) + " – " +
+      d.xg_away.toFixed(2) + "</b> &nbsp;·&nbsp; Both teams to score: <b>" + pct(d.p_btts) +
+      "</b> &nbsp;·&nbsp; Over 2.5 goals: <b>" + pct(d.p_over_25) + "</b></div>" +
+      "<b>Most likely scorelines</b><ul class=\"scores\">" + scores + "</ul>" +
+      (factors ? "<b>Why:</b><ul class=\"factors\">" + factors + "</ul>" : "") +
+      '<div class="disclaimer">' + esc(d.disclaimer || "Statistical model output, not betting advice.") + "</div>";
+  }
+
+  function renderError(home, away, detail) {
+    var detailObj = (detail && typeof detail === "object") ? detail : {};
+    var msg = detailObj.error || (typeof detail === "string" ? detail : "Something went wrong.");
+    var html = "<b>Couldn’t predict that one.</b><br>" + esc(msg);
+    if (detailObj.hint) html += "<br>" + esc(detailObj.hint);
+    if (detailObj.did_you_mean && detailObj.did_you_mean.length) {
+      html += "<br>Did you mean:";
+      var div = addMsg("error", html);
+      var chips = document.createElement("div");
+      chips.className = "chips";
+      detailObj.did_you_mean.forEach(function (suggestion) {
+        var b = document.createElement("button");
+        b.type = "button";
+        b.className = "chip";
+        b.textContent = suggestion;
+        b.addEventListener("click", function () {
+          // Replace whichever input the unknown name came from.
+          var unknown = (msg.match(/Unknown team: '([^']+)'/) || [])[1] || "";
+          var target = (unknown && norm(unknown) === norm(home)) ? homeInput
+            : (unknown && norm(unknown) === norm(away)) ? awayInput
+            : homeInput;
+          target.value = suggestion;
+          target.focus();
+        });
+        chips.appendChild(b);
+      });
+      div.appendChild(chips);
+      return div;
+    }
+    return addMsg("error", html);
+  }
+
+  function fetchWithTimeout(url, options, ms) {
+    var controller = new AbortController();
+    var timer = setTimeout(function () { controller.abort(); }, ms);
+    var opts = Object.assign({}, options || {}, { signal: controller.signal });
+    return fetch(url, opts).finally(function () { clearTimeout(timer); });
+  }
+
+  function doPredict(home, away, league) {
+    lastRequest = { home: home, away: away, league: league };
+    predictButton.disabled = true;
+    addMsg("user", esc(home) + " vs " + esc(away) +
+      (league !== "PL" ? " <span style='opacity:.75'>(" + esc(league) + ")</span>" : ""));
+    var status = addStatus("Waking the model up… this can take up to a minute on the free host.");
+
+    // Wake the free host first, then ask for the prediction.
+    return fetchWithTimeout("/health", {}, 90000)
+      .catch(function () { return null; }) // health is best-effort; predict may still work
+      .then(function () {
+        status.textContent = "Model is awake — predicting…";
+        return fetchWithTimeout("/predict", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ home_team: home, away_team: away, league: league })
+        }, 120000);
+      })
+      .then(function (resp) {
+        status.remove();
+        if (resp.ok) return resp.json().then(function (d) {
+          addMsg("agent", renderPrediction(d));
+        });
+        return resp.json().catch(function () { return {}; }).then(function (body) {
+          renderError(home, away, body.detail || body);
+        });
+      })
+      .catch(function (err) {
+        status.remove();
+        var div = addMsg("error",
+          "<b>The model didn’t answer in time.</b><br>" +
+          "The free service may still be waking up — please wait a few seconds and try again. " +
+          "(" + esc(err && err.name === "AbortError" ? "request timed out" : (err && err.message) || "network error") + ")");
+        var retry = document.createElement("button");
+        retry.type = "button";
+        retry.className = "chip";
+        retry.textContent = "Retry";
+        retry.addEventListener("click", function () {
+          div.remove();
+          doPredict(lastRequest.home, lastRequest.away, lastRequest.league);
+        });
+        div.appendChild(retry);
+      })
+      .finally(function () { predictButton.disabled = false; });
+  }
+
+  form.addEventListener("submit", function (ev) {
+    ev.preventDefault();
+    var home = homeInput.value.trim();
+    var away = awayInput.value.trim();
+    if (!home || !away) return;
+    if (norm(home) === norm(away)) {
+      renderError(home, away, { error: "Home and away teams must be different." });
+      return;
+    }
+    doPredict(home, away, leagueSelect.value);
+  });
+
+  document.getElementById("example-chips").addEventListener("click", function (ev) {
+    var chip = ev.target.closest("[data-home]");
+    if (!chip || predictButton.disabled) return;
+    homeInput.value = chip.getAttribute("data-home");
+    awayInput.value = chip.getAttribute("data-away");
+    doPredict(homeInput.value, awayInput.value, leagueSelect.value);
+  });
+
+  document.getElementById("clear-button").addEventListener("click", function () {
+    log.innerHTML = "";
+  });
+})();
+</script>
+</body>
+</html>

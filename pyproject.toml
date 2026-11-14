@@ -25,5 +25,8 @@ football-predict = "football_agent.cli:main"
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[tool.setuptools.package-data]
+football_agent = ["static/*"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
