@@ -218,11 +218,29 @@ def _predict_one(home: str, away: str, league: str) -> PredictionOut:
 # App
 # ---------------------------------------------------------------------------
 
+from contextlib import asynccontextmanager
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Warm up at startup, not on the first prediction: imports (pandas /
+    # scikit-learn) and the PL model fit happen here, while Render is still
+    # running its health checks. On Render's free tier the first request
+    # after a cold start is already slow; without this, /predict would pay
+    # the whole warm-up cost inside ChatGPT's action timeout.
+    try:
+        get_predictor("PL")
+    except Exception:
+        pass
+    yield
+
+
 app = FastAPI(
     title="Football Predictions Agent API",
     description=("Elo + Dixon-Coles Poisson predictions. The probabilities, xG and "
                  "scorelines returned here are the model's authoritative output."),
     version="0.1.0",
+    lifespan=lifespan,
 )
 app.add_middleware(
     CORSMiddleware,

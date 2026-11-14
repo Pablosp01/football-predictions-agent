@@ -12,6 +12,8 @@ services:
     startCommand: uvicorn football_agent.api:app --host 0.0.0.0 --port $PORT
     healthCheckPath: /health
     envVars:
+      - key: PYTHON_VERSION
+        value: "3.12.0"
       - key: FOOTBALL_DATA_API_KEY
         sync: false
       - key: API_KEY
