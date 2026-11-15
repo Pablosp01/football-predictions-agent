@@ -229,6 +229,8 @@ class PredictionOut(BaseModel):
     top_pick: dict
     # The most likely 1X2 outcome, e.g. {"outcome": "home", "probability": 0.476}.
     match_pick: dict
+    # The more likely BTTS side, e.g. {"side": "yes", "probability": 0.525}.
+    btts_pick: dict
     factors: list[str]
     source: str = "model"
     disclaimer: str = DISCLAIMER
@@ -244,6 +246,7 @@ def _prediction_out(pred, league: str) -> PredictionOut:
         top_scorelines=[{"score": s, "prob": p} for s, p in d["top_scorelines"]],
         p_btts=d["p_btts"], p_over_25=d["p_over_25"], factors=d["factors"],
         totals=d["totals"], top_pick=d["top_pick"], match_pick=d["match_pick"],
+        btts_pick=d["btts_pick"],
     )
 
 

@@ -61,6 +61,17 @@ def match_pick_from_probs(p_home: float, p_draw: float, p_away: float) -> dict:
     return {"outcome": outcome, "probability": prob}
 
 
+def btts_pick_from_prob(p_btts: float) -> dict:
+    """The more likely BTTS side: {"side": "yes"|"no", "probability": p}.
+
+    "yes" when P(both teams score) >= 0.5, otherwise "no" with
+    probability 1 - p_btts. Ties go to "yes".
+    """
+    if p_btts >= 0.5:
+        return {"side": "yes", "probability": p_btts}
+    return {"side": "no", "probability": 1.0 - p_btts}
+
+
 @dataclass
 class Prediction:
     home_team: str
@@ -77,6 +88,7 @@ class Prediction:
     totals: dict[str, dict[str, float]]
     top_pick: dict
     match_pick: dict
+    btts_pick: dict
     factors: list[str]
 
     @property
@@ -99,6 +111,8 @@ class Prediction:
                          "probability": round(self.top_pick["probability"], 4)},
             "match_pick": {"outcome": self.match_pick["outcome"],
                            "probability": round(self.match_pick["probability"], 4)},
+            "btts_pick": {"side": self.btts_pick["side"],
+                          "probability": round(self.btts_pick["probability"], 4)},
             "top_scorelines": [(s, round(p, 4)) for s, p in self.top_scorelines],
             "factors": self.factors,
         }
@@ -194,4 +208,5 @@ class Predictor:
                           flat, p_btts, p_over, confidence,
                           totals, top_pick_from_totals(totals),
                           match_pick_from_probs(p_home, p_draw, p_away),
+                          btts_pick_from_prob(p_btts),
                           factors[:3])

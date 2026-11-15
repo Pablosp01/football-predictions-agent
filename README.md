@@ -73,11 +73,13 @@ The page is a chat: it shows a "waking the model up…" state, calls
 renders the reply as a chat bubble with win/draw/away % bars, expected
 goals, most likely outcome + confidence, top-5 scorelines, BTTS and
 over/under 2.5, and the model's factors. It also shows a "Model's picks"
-section: the match pick (the most likely 1X2 outcome), BTTS Yes/No with
-both probabilities, and the over/under probabilities for total-goals
-lines 1.5, 2.5 and 3.5 — with the model's single most confident totals
-call badged as the pick. All of it is model probabilities, never betting
-recommendations. Unknown team names show the
+section that states the pick in plain words, one sentence per line —
+"Pick: Arsenal win (47.6%)", "Pick: Both teams to score — Yes (52.5%)",
+"Pick: Over 1.5 goals (74.5%)" — followed by the supporting detail:
+the match pick, BTTS Yes/No with both probabilities, and the over/under
+probabilities for total-goals lines 1.5, 2.5 and 3.5, with the model's
+single most confident totals call badged as the pick. All of it is model
+probabilities, never betting recommendations. Unknown team names show the
 "did you mean" suggestions as clickable chips; timeouts offer a Retry
 button. On Render's free plan the first request after idle can take
 50–90s while the service wakes; once warm, predictions take a few
@@ -217,8 +219,12 @@ Goals-total markets are also priced from the scoreline distribution:
 `totals` gives over/under probabilities for lines 1.5, 2.5 and 3.5
 (`{"1.5": {"over": p, "under": 1-p}, ...}`), `top_pick` is the model's
 single most confident totals call (`{"market": "Over 1.5",
-"probability": p}`), and `match_pick` is the most likely 1X2 outcome
-(`{"outcome": "home"|"draw"|"away", "probability": p}`). The legacy
+"probability": p}`), `match_pick` is the most likely 1X2 outcome
+(`{"outcome": "home"|"draw"|"away", "probability": p}`), and
+`btts_pick` is the more likely BTTS side (`{"side": "yes"|"no",
+"probability": p}`, ties go to "yes"). The page and CLI turn the three
+picks into plain sentences: "Pick: Arsenal win (47.6%)", "Pick: Both
+teams to score — Yes (52.5%)", "Pick: Over 1.5 goals (74.5%)". The legacy
 `p_btts` and `p_over_25` fields are unchanged.
 
 ## Limitations

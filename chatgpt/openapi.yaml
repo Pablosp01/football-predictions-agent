@@ -43,7 +43,10 @@ paths:
         probabilities, confidence and the top driving factors. It also
         returns the goals-total markets (over/under for lines 1.5, 2.5
         and 3.5), the model's single most confident totals call
-        (top_pick) and the most likely 1X2 outcome (match_pick). These numbers
+        (top_pick), the most likely 1X2 outcome (match_pick) and the
+        more likely BTTS side (btts_pick). State the three picks in plain
+        words — "Pick: Arsenal win (47.6%)", "Pick: Both teams to score
+        — Yes (52.5%)", "Pick: Over 1.5 goals (74.5%)". These numbers
         are the prediction. Team names are fuzzy-matched ("Man Utd",
         "Man United", "Spurs" all work); an unknown name returns a 400 with
         "did you mean" suggestions — use one of those and call again.
@@ -221,6 +224,12 @@ components:
           properties:
             outcome: { type: string, enum: [home, draw, away], example: home }
             probability: { type: number, example: 0.476 }
+        btts_pick:
+          type: object
+          description: "The more likely BTTS side; ties go to yes"
+          properties:
+            side: { type: string, enum: [yes, no], example: yes }
+            probability: { type: number, example: 0.525 }
         factors:
           type: array
           items: { type: string }

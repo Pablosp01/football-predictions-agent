@@ -190,28 +190,58 @@
   }
 
   function renderPicks(d) {
-    // "Model's picks": the match pick, BTTS both sides, and the three
-    // goals-total lines — with the model's single most confident totals
-    // call badged. All model probabilities, never betting recommendations.
-    if (!d.totals || !d.top_pick || !d.match_pick) return "";
-    var matchLabel = d.match_pick.outcome === "home" ? esc(d.home_team) + " win"
-      : d.match_pick.outcome === "away" ? esc(d.away_team) + " win" : "Draw";
-    var lines = ["1.5", "2.5", "3.5"].map(function (line) {
-      var sides = d.totals[line];
-      if (!sides) return "";
-      var overTop = d.top_pick.market === "Over " + line;
-      var underTop = d.top_pick.market === "Under " + line;
-      return '<div class="row">Over ' + line + " goals: <b>" + pct(sides.over) + "</b>" +
-        (overTop ? '<span class="badge">Model’s pick</span>' : "") +
-        " &nbsp;·&nbsp; Under " + line + " goals: <b>" + pct(sides.under) + "</b>" +
-        (underTop ? '<span class="badge">Model’s pick</span>' : "") + "</div>";
-    }).join("");
-    return "<h4>🎯 Model’s picks</h4>" +
-      '<div class="row">Match: <b>' + matchLabel + "</b> — " +
-      pct(d.match_pick.probability) + "</div>" +
-      '<div class="row">Both teams to score: <b>Yes ' + pct(d.p_btts) +
-      "</b> &nbsp;·&nbsp; No <b>" + pct(1 - d.p_btts) + "</b></div>" +
-      lines;
+    // "Model's picks": a plain-language verdict first — three "Pick: "
+    // sentences (match winner, BTTS yes/no, goals total) — then the
+    // supporting percentages below. All model probabilities, never
+    // betting recommendations. Each verdict line renders only if its
+    // field is present; BTTS falls back to p_btts when btts_pick is absent.
+    var verdict = [];
+    if (d.match_pick) {
+      var matchLabel = d.match_pick.outcome === "home" ? d.home_team + " win"
+        : d.match_pick.outcome === "away" ? d.away_team + " win" : "Draw";
+      verdict.push('<div class="row">Pick: <b>' + esc(matchLabel) + "</b> (" +
+        pct(d.match_pick.probability) + ")</div>");
+    }
+    var btts = d.btts_pick;
+    if (!btts && typeof d.p_btts === "number") {
+      btts = d.p_btts >= 0.5 ? { side: "yes", probability: d.p_btts }
+        : { side: "no", probability: 1 - d.p_btts };
+    }
+    if (btts) {
+      verdict.push('<div class="row">Pick: Both teams to score — <b>' +
+        (btts.side === "no" ? "No" : "Yes") + "</b> (" +
+        pct(btts.probability) + ")</div>");
+    }
+    if (d.top_pick) {
+      verdict.push('<div class="row">Pick: <b>' + esc(d.top_pick.market) +
+        " goals</b> (" + pct(d.top_pick.probability) + ")</div>");
+    }
+    var lines = "";
+    if (d.totals) {
+      lines = ["1.5", "2.5", "3.5"].map(function (line) {
+        var sides = d.totals[line];
+        if (!sides) return "";
+        var overTop = d.top_pick && d.top_pick.market === "Over " + line;
+        var underTop = d.top_pick && d.top_pick.market === "Under " + line;
+        return '<div class="row">Over ' + line + " goals: <b>" + pct(sides.over) + "</b>" +
+          (overTop ? '<span class="badge">Model’s pick</span>' : "") +
+          " &nbsp;·&nbsp; Under " + line + " goals: <b>" + pct(sides.under) + "</b>" +
+          (underTop ? '<span class="badge">Model’s pick</span>' : "") + "</div>";
+      }).join("");
+    }
+    if (!verdict.length && !lines) return "";
+    var detail = "";
+    if (d.match_pick) {
+      var matchLabel = d.match_pick.outcome === "home" ? esc(d.home_team) + " win"
+        : d.match_pick.outcome === "away" ? esc(d.away_team) + " win" : "Draw";
+      detail += '<div class="row">Match: <b>' + matchLabel + "</b> — " +
+        pct(d.match_pick.probability) + "</div>";
+    }
+    if (typeof d.p_btts === "number") {
+      detail += '<div class="row">Both teams to score: <b>Yes ' + pct(d.p_btts) +
+        "</b> &nbsp;·&nbsp; No <b>" + pct(1 - d.p_btts) + "</b></div>";
+    }
+    return "<h4>🎯 Model’s picks</h4>" + verdict.join("") + detail + lines;
   }
 
   function renderError(home, away, detail) {

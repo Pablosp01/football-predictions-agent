@@ -37,8 +37,15 @@ def cmd_predict(args: argparse.Namespace) -> int:
     print("  Goals totals: " + "  ".join(
         f"Over {line}: {sides['over']:.1%} / Under {line}: {sides['under']:.1%}"
         for line, sides in pred.totals.items()))
-    print(f"  Model's pick: {pred.top_pick['market']} "
-          f"({pred.top_pick['probability']:.0%} confidence)")
+    match_label = {"home": f"{pred.home_team} win",
+                   "away": f"{pred.away_team} win",
+                   "draw": "Draw"}[pred.match_pick["outcome"]]
+    print(f"  Pick: {match_label} ({pred.match_pick['probability']:.1%})")
+    print(f"  Pick: Both teams to score — "
+          f"{'Yes' if pred.btts_pick['side'] == 'yes' else 'No'} "
+          f"({pred.btts_pick['probability']:.1%})")
+    print(f"  Pick: {pred.top_pick['market']} goals "
+          f"({pred.top_pick['probability']:.1%})")
     print("  Key factors:")
     for f in pred.factors:
         print(f"    - {f}")
