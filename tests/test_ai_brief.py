@@ -70,12 +70,14 @@ FAKE_AGENTROUTER_OUTPUT_SHAPE = {
 class _FakeResponse:
     """Minimal stand-in for requests.Response."""
 
-    def __init__(self, status_code=200, payload=None, text=None):
+    def __init__(self, status_code=200, payload=None, text=None,
+                 headers=None):
         self.status_code = status_code
         self._payload = payload
         # Explicit text wins (so a truly empty body can be faked);
         # otherwise the body is the JSON of the payload.
         self.text = text if text is not None else json.dumps(payload or {})
+        self.headers = headers or {}
 
     def json(self):
         if self._payload is None:
@@ -498,26 +500,45 @@ def test_ai_brief_empty_answer_502(monkeypatch):
 
 
 def test_ai_brief_empty_body_502(monkeypatch):
-    """AgentRouter 200 with an empty body: 502 naming the empty response."""
+    """AgentRouter 200 with an empty body: 502 naming the empty
+    response, and no retry (an empty body will not change)."""
     _set_keys(monkeypatch, agentrouter=True, xingchi=False)
     with _client() as client, patch(
             "football_agent.api.requests.post",
-            return_value=_FakeResponse(200, None, text="")):
+            return_value=_FakeResponse(200, None, text="")) as mock_post:
         r = _post_brief(client)
     assert r.status_code == 502, r.text
     assert "empty response" in r.json()["detail"]["hint"]
+    assert mock_post.call_count == 1
 
 
-def test_ai_brief_non_json_body_502(monkeypatch):
-    """AgentRouter 200 with an HTML body: 502, unreadable response."""
+def test_ai_brief_waf_html_body_502(monkeypatch):
+    """AgentRouter 200 with an HTML (web firewall) body: 502 naming
+    the firewall, and no retry — the second attempt gets the same page."""
+    _set_keys(monkeypatch, agentrouter=True, xingchi=False)
+    with _client() as client, patch(
+            "football_agent.api.requests.post",
+            return_value=_FakeResponse(
+                200, None, text="<html>challenge page</html>",
+                headers={"Content-Type": "text/html; charset=utf-8"},
+            )) as mock_post:
+        r = _post_brief(client)
+    assert r.status_code == 502, r.text
+    assert "web firewall" in r.json()["detail"]["hint"]
+    assert mock_post.call_count == 1
+
+
+def test_ai_brief_non_json_body_retried_502(monkeypatch):
+    """A non-HTML, non-empty unreadable body is transient: retried once."""
     _set_keys(monkeypatch, agentrouter=True, xingchi=False)
     with _client() as client, patch(
             "football_agent.api.requests.post",
             return_value=_FakeResponse(200, None,
-                                       text="<html>error page</html>")):
+                                       text="not json {{{")) as mock_post:
         r = _post_brief(client)
     assert r.status_code == 502, r.text
     assert "unreadable response" in r.json()["detail"]["hint"]
+    assert mock_post.call_count == 2
 
 
 def test_brief_prompt_no_upcoming_fixture_fallback():

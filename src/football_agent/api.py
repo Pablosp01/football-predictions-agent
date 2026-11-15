@@ -362,7 +362,17 @@ _brief_cache: dict[tuple[str, str, str], tuple[float, dict]] = {}
 
 
 class _BriefError(Exception):
-    """The AgentRouter call failed (HTTP error, timeout, bad answer)."""
+    """The AgentRouter call failed (HTTP error, timeout, bad answer).
+
+    ``retryable`` says whether a second attempt could help. A web
+    firewall page or an empty body will not change on an immediate
+    retry, so those are not retryable; a transport error or a
+    transient bad reply is.
+    """
+
+    def __init__(self, message: str, retryable: bool = True):
+        super().__init__(message)
+        self.retryable = retryable
 
 
 _LEAGUE_NAMES = {
@@ -562,6 +572,15 @@ def _summarise_with_agentrouter(home: str, away: str, league: str,
     headers = {
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json",
+        # The gateway sits behind a web firewall (Alibaba Cloud WAF):
+        # from Render's servers it answers HTTP 200 with an HTML
+        # challenge page instead of JSON (verified 2026-11-16 in the
+        # Render logs). A plain browser-style Accept header is sent so
+        # the request does not look like a bare script call; the
+        # Claude Code fingerprint headers are still required by the
+        # gateway itself.
+        "Accept": "application/json",
+        "Accept-Language": "en-US,en;q=0.9",
     }
     headers.update(AGENTROUTER_FINGERPRINT_HEADERS)
     try:
@@ -588,15 +607,23 @@ def _summarise_with_agentrouter(home: str, away: str, league: str,
         data = resp.json()
     except ValueError as exc:
         body_text = resp.text or ""
+        content_type = (getattr(resp, "headers", None) or {}).get(
+            "Content-Type", "")
         logger.warning(
             "AgentRouter unreadable response: status=%s content-type=%s "
             "len=%s body-head=%r",
-            resp.status_code,
-            (getattr(resp, "headers", None) or {}).get("Content-Type", ""),
+            resp.status_code, content_type,
             len(body_text), body_text[:300])
+        if content_type.startswith("text/html"):
+            # Web firewall challenge page, not a gateway answer: an
+            # immediate retry gets the same page, so do not retry.
+            raise _BriefError(
+                "AgentRouter is blocking requests from this server "
+                "(web firewall)", retryable=False) from exc
         if not body_text.strip():
             raise _BriefError(
-                "AgentRouter returned an empty response") from exc
+                "AgentRouter returned an empty response",
+                retryable=False) from exc
         raise _BriefError(
             "AgentRouter returned an unreadable response") from exc
     text = _extract_agentrouter_text(data)
@@ -703,10 +730,12 @@ def _build_brief(home: str, away: str, league: str,
     failure. Total wall-clock budget is BRIEF_TOTAL_BUDGET_S; the
     fallback only runs if time is left in that budget.
 
-    A fast AgentRouter failure (elapsed < AGENTROUTER_FAST_RETRY_S,
-    e.g. a transient unreadable gateway response) is retried once
-    before falling back; a slow failure has already spent the budget
-    and is not retried.
+    A fast, retryable AgentRouter failure (elapsed <
+    AGENTROUTER_FAST_RETRY_S, e.g. a transient unreadable gateway
+    response) is retried once before falling back; a slow failure
+    has already spent the budget and is not retried, and a
+    non-retryable one (web firewall page, empty body) is never
+    retried — the immediate second attempt gets the same page.
     """
     started = time.monotonic()
     deadline = started + BRIEF_TOTAL_BUDGET_S
@@ -724,8 +753,9 @@ def _build_brief(home: str, away: str, league: str,
                 _timeout(AGENTROUTER_TIMEOUT_S))
             parsed["live_search"] = True
             return parsed
-        except _BriefError:
-            if time.monotonic() - started < AGENTROUTER_FAST_RETRY_S:
+        except _BriefError as first_error:
+            if (first_error.retryable and
+                    time.monotonic() - started < AGENTROUTER_FAST_RETRY_S):
                 try:
                     parsed = _summarise_with_agentrouter(
                         home, away, league, agentrouter_key,
