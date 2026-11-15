@@ -16,7 +16,21 @@
   header h1 { margin: 0; font-size: 1.5rem; }
   header h1 span { color: var(--green); }
   header p { margin: 6px 0 0; color: var(--muted); font-size: .9rem; }
-  #chat-log { display: flex; flex-direction: column; gap: 10px; margin: 16px 0; }
+  #chat-log, #chatbot-log { display: flex; flex-direction: column; gap: 10px; margin: 16px 0; }
+  #chatbot-log { max-height: 55vh; overflow-y: auto; }
+  .tabs { display: flex; gap: 8px; margin: 14px 0 4px; }
+  .tab { flex: 1; padding: 10px; border-radius: 10px; border: 1px solid #2b4365;
+         background: var(--panel); color: var(--ink); font-size: 1rem; cursor: pointer; }
+  .tab.active { background: var(--green); color: #06130a; font-weight: 700;
+                border-color: var(--green); }
+  form#chatbot-form { display: flex; gap: 8px; margin-top: 10px; }
+  form#chatbot-form input {
+    flex: 1; padding: 10px; border-radius: 8px; border: 1px solid #2b4365;
+    background: var(--bg); color: var(--ink); font-size: 1rem; min-width: 0; }
+  form#chatbot-form button {
+    padding: 10px 16px; border: 0; border-radius: 8px; cursor: pointer;
+    background: var(--green); color: #06130a; font-weight: 700; font-size: 1rem; }
+  form#chatbot-form button:disabled { opacity: .55; cursor: wait; }
   .msg { max-width: 92%; padding: 10px 12px; border-radius: 14px; line-height: 1.45;
          font-size: .95rem; white-space: normal; }
   .msg.user { align-self: flex-end; background: var(--user); }
@@ -80,6 +94,12 @@
     <p>Elo + Dixon-Coles Poisson model — type two teams, get the model's prediction.</p>
   </header>
 
+  <nav class="tabs" role="tablist" aria-label="Mode">
+    <button type="button" class="tab active" id="tab-predict" role="tab" aria-selected="true" aria-controls="predict-panel">Predict</button>
+    <button type="button" class="tab" id="tab-chatbot" role="tab" aria-selected="false" aria-controls="chatbot-panel">Chatbot</button>
+  </nav>
+
+  <section id="predict-panel" role="tabpanel" aria-labelledby="tab-predict">
   <div id="chat-log" aria-live="polite"></div>
 
   <div class="examples" id="example-chips">
@@ -119,9 +139,352 @@
       leagues need FOOTBALL_DATA_API_KEY set on the server. The free host sleeps
       when idle, so the first prediction can take up to a minute while it wakes up.</p>
   </form>
+  </section>
+
+  <section id="chatbot-panel" role="tabpanel" aria-labelledby="tab-chatbot" hidden>
+    <div id="chatbot-log" aria-live="polite"></div>
+    <div class="examples">
+      <span>Try:</span>
+      <button type="button" class="chip" data-chat="Arsenal vs Chelsea">Arsenal vs Chelsea</button>
+      <button type="button" class="chip" data-chat="Who wins, Man Utd or Liverpool?">Who wins, Man Utd or Liverpool?</button>
+      <button type="button" class="chip" data-chat="Argentina vs Brazil">Argentina vs Brazil</button>
+    </div>
+    <form id="chatbot-form">
+      <input id="chatbot-input" type="text" placeholder="Type two teams, e.g. Arsenal vs Chelsea" autocomplete="off">
+      <button id="chatbot-send" type="submit">Send</button>
+    </form>
+    <p class="note">Type the way you would in a chat — nicknames work (“Man Utd”, “Spurs”).
+      The league follows the selection in the Predict tab.</p>
+  </section>
 </div>
 
 <script>
+// __CHAT_PARSER_START__
+// Chatbot message parser: turns free text ("Arsenal vs Chelsea",
+// "who wins Man Utd or Liverpool?") into two team names. Pure
+// functions — no DOM access — so they can be tested under node by
+// extracting this block. Team names come from the repo's own data
+// (data/sample/pl_matches.csv + international_matches.csv) and the
+// API's aliases, so the parser and the API agree on names. An entry
+// is either a canonical name (its only form) or [name, [forms...]].
+var CHAT_TEAMS = [
+["Arsenal", ["arsenal", "the gunners"]],
+["Aston Villa", ["aston villa", "villa"]],
+["Bournemouth", ["bournemouth"]],
+["Brentford", ["brentford"]],
+["Brighton", ["brighton", "brighton and hove albion", "brighton hove albion"]],
+["Burnley", ["burnley"]],
+["Chelsea", ["chelsea"]],
+["Crystal Palace", ["crystal palace", "palace"]],
+["Everton", ["everton"]],
+["Fulham", ["fulham"]],
+["Ipswich", ["ipswich", "ipswich town"]],
+["Leeds", ["leeds", "leeds united"]],
+["Leicester", ["leicester", "leicester city"]],
+["Liverpool", ["liverpool"]],
+["Man City", ["man city", "manchester city", "city"]],
+["Man Utd", ["man utd", "man united", "manchester united", "manchester utd", "united"]],
+["Newcastle", ["newcastle", "newcastle united"]],
+["Nott'm Forest", ["nott'm forest", "nottingham forest", "forest"]],
+["Southampton", ["southampton", "saints"]],
+["Sunderland", ["sunderland"]],
+["Tottenham", ["tottenham", "tottenham hotspur", "spurs"]],
+["West Ham", ["west ham", "west ham united"]],
+["Wolves", ["wolves", "wolverhampton", "wolverhampton wanderers"]],
+"Albania",
+"Algeria",
+"Andorra",
+"Angola",
+"Anguilla",
+"Antigua and Barbuda",
+"Argentina",
+"Armenia",
+"Aruba",
+"Australia",
+"Austria",
+"Azerbaijan",
+"Bahamas",
+"Bahrain",
+"Barbados",
+"Belarus",
+"Belgium",
+"Belize",
+"Benin",
+"Bermuda",
+"Bolivia",
+"Bonaire",
+["Bosnia and Herzegovina", ["bosnia and herzegovina", "bosnia"]],
+"Botswana",
+"Brazil",
+"British Virgin Islands",
+"Bulgaria",
+"Burkina Faso",
+"Cameroon",
+"Canada",
+"Cape Verde",
+"Cayman Islands",
+"Chile",
+"China",
+"Colombia",
+"Comoros",
+"Costa Rica",
+"Croatia",
+"Cuba",
+"Curaçao",
+"Cyprus",
+["Czech Republic", ["czech republic", "czechia"]],
+["DR Congo", ["dr congo", "congo"]],
+"Denmark",
+"Dominica",
+"Dominican Republic",
+"Ecuador",
+"Egypt",
+"El Salvador",
+"England",
+"Equatorial Guinea",
+"Eritrea",
+"Estonia",
+"Faroe Islands",
+"Finland",
+"France",
+"French Guiana",
+"Gabon",
+"Gambia",
+"Georgia",
+"Germany",
+"Ghana",
+"Gibraltar",
+"Greece",
+"Grenada",
+"Guadeloupe",
+"Guatemala",
+"Guinea",
+"Guinea-Bissau",
+"Guyana",
+"Haiti",
+"Honduras",
+"Hong Kong",
+"Hungary",
+"Iceland",
+"India",
+"Indonesia",
+["Iran", ["iran", "ir iran"]],
+"Iraq",
+"Israel",
+"Italy",
+["Ivory Coast", ["ivory coast", "cote d'ivoire", "c te d'ivoire"]],
+"Jamaica",
+"Japan",
+"Jordan",
+"Kazakhstan",
+"Kenya",
+"Kosovo",
+"Kyrgyzstan",
+"Latvia",
+"Lebanon",
+"Lesotho",
+"Liechtenstein",
+"Lithuania",
+"Luxembourg",
+"Malawi",
+"Malaysia",
+"Mali",
+"Malta",
+"Martinique",
+"Mauritania",
+"Mexico",
+"Moldova",
+"Montenegro",
+"Montserrat",
+"Morocco",
+"Mozambique",
+"Namibia",
+["Netherlands", ["netherlands", "holland"]],
+"New Zealand",
+"Nicaragua",
+"Niger",
+"Nigeria",
+"North Macedonia",
+"Northern Ireland",
+"Norway",
+"Oman",
+"Palestine",
+"Panama",
+"Paraguay",
+"Peru",
+"Poland",
+"Portugal",
+"Puerto Rico",
+"Qatar",
+["Republic of Ireland", ["republic of ireland", "ireland"]],
+"Romania",
+"Saint Kitts and Nevis",
+"Saint Lucia",
+"Saint Martin",
+"Saint Vincent and the Grenadines",
+"San Marino",
+"Saudi Arabia",
+"Scotland",
+"Senegal",
+"Serbia",
+"Sint Maarten",
+"Slovakia",
+"Slovenia",
+"Somalia",
+"South Africa",
+["South Korea", ["south korea", "korea republic", "korea"]],
+"South Sudan",
+"Spain",
+"Sudan",
+"Suriname",
+"Sweden",
+"Switzerland",
+"Syria",
+"Tajikistan",
+"Tanzania",
+"Thailand",
+"Trinidad and Tobago",
+"Tunisia",
+["Turkey", ["turkey", "turkiye"]],
+"Turks and Caicos Islands",
+"Uganda",
+"Ukraine",
+["United Arab Emirates", ["united arab emirates", "uae"]],
+["United States", ["united states", "usa", "america", "united states of america"]],
+"United States Virgin Islands",
+"Uruguay",
+"Uzbekistan",
+"Venezuela",
+"Vietnam",
+"Wales",
+"Zambia",
+"Zimbabwe"
+];
+
+function chatNorm(s) {
+  return String(s).toLowerCase().replace(/[^a-z0-9' ]/g, " ")
+    .replace(/\s+/g, " ").replace(/^ | $/g, "");
+}
+
+function chatTeamName(entry) {
+  return typeof entry === "string" ? entry : entry[0];
+}
+
+function chatTeamForms(entry) {
+  return typeof entry === "string" ? [chatNorm(entry)] : entry[1];
+}
+
+function chatEscapeRe(s) {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&").replace(/ /g, "\\s+");
+}
+
+// Find known team names in normalised text, longest match first at
+// each position, word-boundary aware, no overlapping matches.
+// Returns distinct canonical names in order of appearance.
+function chatFindTeams(normed) {
+  var found = [];
+  var i, j;
+  for (i = 0; i < CHAT_TEAMS.length; i++) {
+    var forms = chatTeamForms(CHAT_TEAMS[i]);
+    for (j = 0; j < forms.length; j++) {
+      var form = forms[j];
+      if (!form) continue;
+      var m = new RegExp("\\b" + chatEscapeRe(form) + "\\b").exec(normed);
+      if (m) found.push({ team: chatTeamName(CHAT_TEAMS[i]), index: m.index, len: form.length });
+    }
+  }
+  found.sort(function (a, b) { return a.index - b.index || b.len - a.len; });
+  var picked = [];
+  var used = {};
+  for (i = 0; i < found.length; i++) {
+    var f = found[i];
+    if (used[f.team]) continue;
+    var overlap = false;
+    for (j = 0; j < picked.length; j++) {
+      if (f.index < picked[j].index + picked[j].len &&
+          picked[j].index < f.index + f.len) { overlap = true; break; }
+    }
+    if (overlap) continue;
+    used[f.team] = true;
+    picked.push(f);
+  }
+  return picked.map(function (p) { return p.team; });
+}
+
+var CHAT_FILLER = ["predict", "prediction", "who", "wins", "win", "will",
+  "beat", "beats", "please", "tell", "me", "pick", "between", "match",
+  "game", "for", "the", "a", "an", "of", "can", "you", "i", "want", "know",
+  "is", "are", "vs", "v", "versus", "against"];
+var CHAT_TAIL_FILLER = ["tomorrow", "today", "tonight", "please"];
+
+function chatCleanSide(s) {
+  var words = chatNorm(s).split(" ").filter(function (w) { return w; });
+  while (words.length && CHAT_FILLER.indexOf(words[0]) !== -1) words.shift();
+  while (words.length && CHAT_TAIL_FILLER.indexOf(words[words.length - 1]) !== -1) words.pop();
+  return words.join(" ");
+}
+
+// Split on "vs / v / versus / against / or / -" and take two sides.
+// Only used when no known team name matched, so it can also catch
+// teams outside the embedded list (other leagues) — the API then
+// resolves or suggests. Returns [home, away] or null.
+function chatSplitSides(normed) {
+  var parts = normed.split(/\s+vs\.?\s+|\s+v\.?\s+|\s+versus\s+|\s+against\s+|\s+or\s+|\s*[-–—]\s*/);
+  if (parts.length < 2) return null;
+  var home = chatCleanSide(parts[0]);
+  var away = chatCleanSide(parts.slice(1).join(" "));
+  if (!home || !away) return null;
+  if (home.split(" ").length > 4 || away.split(" ").length > 4) return null;
+  return [home, away];
+}
+
+// Parse a free-text chat message. pendingTeam is the canonical name of
+// a team the user named in the previous message (or null). Returns one of:
+//   {kind: "greeting"} | {kind: "help"} | {kind: "need-teams"} |
+//   {kind: "pending", team} | {kind: "same-team", team} |
+//   {kind: "predict", home, away}
+function parseChatMessage(text, pendingTeam) {
+  var normed = chatNorm(text);
+  var words = normed.split(" ").filter(function (w) { return w; });
+  // Short greetings and help, not prediction attempts.
+  if (words.length <= 3 &&
+      /^(hi|hello|hey|yo|hiya|good morning|good afternoon|good evening)\b/.test(normed)) {
+    return { kind: "greeting" };
+  }
+  var teams = chatFindTeams(normed);
+  if (teams.length >= 2) {
+    return { kind: "predict", home: teams[0], away: teams[1] };
+  }
+  if (teams.length === 1) {
+    if (pendingTeam && chatNorm(pendingTeam) === chatNorm(teams[0])) {
+      return { kind: "same-team", team: teams[0] };
+    }
+    if (pendingTeam) {
+      return { kind: "predict", home: pendingTeam, away: teams[0] };
+    }
+    return { kind: "pending", team: teams[0] };
+  }
+  if (/\bhelp\b/.test(normed)) return { kind: "help" };
+  var sides = chatSplitSides(normed);
+  if (sides) {
+    return { kind: "predict", home: sides[0], away: sides[1] };
+  }
+  if (pendingTeam) {
+    // A short message with a team pending is the second team, typed
+    // plainly ("Real Madrid") — let the API resolve or suggest.
+    var cleaned = chatCleanSide(normed);
+    var reject = ["don't", "dont", "not", "know", "no", "idk", "dunno",
+      "skip", "cancel", "never", "mind", "stop"];
+    var cw = cleaned.split(" ").filter(function (w) { return w; });
+    if (cleaned && cw.length <= 4 &&
+        !cw.some(function (w) { return reject.indexOf(w) !== -1; })) {
+      return { kind: "predict", home: pendingTeam, away: cleaned };
+    }
+  }
+  return { kind: "need-teams" };
+}
+// __CHAT_PARSER_END__
+
 (function () {
   "use strict";
   var log = document.getElementById("chat-log");
@@ -161,16 +524,16 @@
   }
   function pctTenths(t) { return (t / 10).toFixed(1) + "%"; }
 
-  function addMsg(cls, html) {
+  function addMsg(cls, html, target) {
     var div = document.createElement("div");
     div.className = "msg " + cls;
     div.innerHTML = html;
-    log.appendChild(div);
+    (target || log).appendChild(div);
     div.scrollIntoView({ block: "nearest" });
     return div;
   }
-  function addStatus(text) {
-    return addMsg("status", esc(text));
+  function addStatus(text, target) {
+    return addMsg("status", esc(text), target);
   }
 
   // Intro message from the agent.
@@ -267,36 +630,42 @@
     return "<h4>🎯 Model’s picks</h4>" + verdict.join("") + detail + lines;
   }
 
-  function renderError(home, away, detail) {
+  // opts: {target} — message log to append to (default: predict log);
+  // {onSuggest} — chatbot mode: called with (suggestion, unknownName)
+  // instead of filling the predict form inputs.
+  function renderError(home, away, detail, opts) {
+    opts = opts || {};
+    var target = opts.target || log;
     var detailObj = (detail && typeof detail === "object") ? detail : {};
     var msg = detailObj.error || (typeof detail === "string" ? detail : "Something went wrong.");
     var html = "<b>Couldn’t predict that one.</b><br>" + esc(msg);
     if (detailObj.hint) html += "<br>" + esc(detailObj.hint);
     if (detailObj.did_you_mean && detailObj.did_you_mean.length) {
       html += "<br>Did you mean:";
-      var div = addMsg("error", html);
+      var div = addMsg("error", html, target);
       var chips = document.createElement("div");
       chips.className = "chips";
+      var unknown = (msg.match(/Unknown team: '([^']+)'/) || [])[1] || "";
       detailObj.did_you_mean.forEach(function (suggestion) {
         var b = document.createElement("button");
         b.type = "button";
         b.className = "chip";
         b.textContent = suggestion;
         b.addEventListener("click", function () {
+          if (opts.onSuggest) { opts.onSuggest(suggestion, unknown); return; }
           // Replace whichever input the unknown name came from.
-          var unknown = (msg.match(/Unknown team: '([^']+)'/) || [])[1] || "";
-          var target = (unknown && norm(unknown) === norm(home)) ? homeInput
+          var inputTarget = (unknown && norm(unknown) === norm(home)) ? homeInput
             : (unknown && norm(unknown) === norm(away)) ? awayInput
             : homeInput;
-          target.value = suggestion;
-          target.focus();
+          inputTarget.value = suggestion;
+          inputTarget.focus();
         });
         chips.appendChild(b);
       });
       div.appendChild(chips);
       return div;
     }
-    return addMsg("error", html);
+    return addMsg("error", html, target);
   }
 
   function renderBrief(d) {
@@ -317,6 +686,12 @@
         "the model’s, not the AI’s.</div>";
     }
     if (d.summary) html += "<p>" + esc(d.summary) + "</p>";
+    var hasContent = (d.summary && d.summary.trim()) ||
+      (d.form && d.form.length) || (d.injuries && d.injuries.length) ||
+      (d.news && d.news.length);
+    if (!hasContent) {
+      html += "<p>No recent news found for this fixture.</p>";
+    }
     function section(title, items) {
       if (!items || !items.length) return "";
       return "<b>" + esc(title) + "</b><ul class=\"factors\">" +
@@ -344,11 +719,11 @@
     return html;
   }
 
-  function loadBrief(home, away, league) {
+  function loadBrief(home, away, league, target) {
     var box = addMsg("agent",
       "<b>🔍 AI match briefing</b><br>" +
       '<span class="sub">Searching the web for team news… this can take ' +
-      "up to a minute while the AI searches.</span>");
+      "up to a minute while the AI searches.</span>", target);
     fetchWithTimeout("/ai-brief", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -450,6 +825,185 @@
 
   document.getElementById("clear-button").addEventListener("click", function () {
     log.innerHTML = "";
+  });
+
+  // ------------------------------------------------------------------
+  // Chatbot tab: type the way you would in a chat, get a prediction.
+  // The league follows the Predict tab's dropdown. Parsing is done by
+  // the pure parseChatMessage() above; prediction rendering reuses
+  // renderPrediction / loadBrief / renderError from the Predict tab.
+  // ------------------------------------------------------------------
+  var tabPredict = document.getElementById("tab-predict");
+  var tabChatbot = document.getElementById("tab-chatbot");
+  var predictPanel = document.getElementById("predict-panel");
+  var chatbotPanel = document.getElementById("chatbot-panel");
+  var chatLog = document.getElementById("chatbot-log");
+  var chatForm = document.getElementById("chatbot-form");
+  var chatInput = document.getElementById("chatbot-input");
+  var chatSend = document.getElementById("chatbot-send");
+  var chatWelcomeShown = false;
+  var pendingTeam = null;
+  var chatBusy = false;
+  var lastChatRequest = null;
+
+  var CHAT_GREETING =
+    "<b>Hi! 👋</b><br>Ask me about a match the way you would in a chat — " +
+    "for example “Arsenal vs Chelsea” or “Who wins, Man Utd or Liverpool?” " +
+    "I’ll give you the model’s prediction in plain words.";
+  var CHAT_HELP =
+    "<b>Here’s how I work.</b><br>Type two team names, e.g. “Arsenal vs Chelsea”. " +
+    "Nicknames work (“Man Utd”, “Spurs”). You can also name one team and I’ll ask " +
+    "who they’re playing. The league follows the selection in the Predict tab.";
+
+  // Club teams (Premier League sample) — used only to tell a national
+  // team from a club team for the league tip in chatPredictError.
+  var CHAT_CLUB_TEAMS = ["Arsenal", "Aston Villa", "Bournemouth",
+    "Brentford", "Brighton", "Burnley", "Chelsea", "Crystal Palace",
+    "Everton", "Fulham", "Ipswich", "Leeds", "Leicester", "Liverpool",
+    "Man City", "Man Utd", "Newcastle", "Nott'm Forest", "Southampton",
+    "Sunderland", "Tottenham", "West Ham", "Wolves"];
+  function chatIsIntlName(name) {
+    var n = chatNorm(name);
+    var isClub = CHAT_CLUB_TEAMS.some(function (t) { return chatNorm(t) === n; });
+    if (isClub) return false;
+    return chatFindTeams(n).length > 0;
+  }
+
+  function addChatMsg(cls, html) { return addMsg(cls, html, chatLog); }
+
+  function showTab(which) {
+    var chat = which === "chatbot";
+    tabPredict.classList.toggle("active", !chat);
+    tabChatbot.classList.toggle("active", chat);
+    tabPredict.setAttribute("aria-selected", String(!chat));
+    tabChatbot.setAttribute("aria-selected", String(chat));
+    predictPanel.hidden = chat;
+    chatbotPanel.hidden = !chat;
+    if (chat && !chatWelcomeShown) {
+      chatWelcomeShown = true;
+      addChatMsg("agent", CHAT_GREETING);
+    }
+    if (chat) chatInput.focus();
+  }
+  tabPredict.addEventListener("click", function () { showTab("predict"); });
+  tabChatbot.addEventListener("click", function () { showTab("chatbot"); });
+
+  function setChatBusy(busy) {
+    chatBusy = busy;
+    chatSend.disabled = busy;
+    chatInput.disabled = busy;
+  }
+
+  function chatPredictError(home, away, detail) {
+    var div = renderError(home, away, detail, {
+      target: chatLog,
+      onSuggest: function (suggestion, unknown) {
+        // Replace the unknown side with the suggestion and predict again.
+        var nextHome = home, nextAway = away;
+        if (unknown && chatNorm(unknown) === chatNorm(home)) nextHome = suggestion;
+        else if (unknown && chatNorm(unknown) === chatNorm(away)) nextAway = suggestion;
+        else nextHome = suggestion;
+        chatPredict(nextHome, nextAway, leagueSelect.value);
+      }
+    });
+    var detailObj = (detail && typeof detail === "object") ? detail : {};
+    if (detailObj.error && detailObj.error.indexOf("Unknown team") === 0 &&
+        leagueSelect.value !== "WC" && leagueSelect.value !== "EC" &&
+        chatIsIntlName(home) && chatIsIntlName(away)) {
+      var tip = addChatMsg("agent",
+        "Those look like national teams — switch the league in the " +
+        "<b>Predict</b> tab to World Cup or Euros, then ask again.");
+      void tip;
+    }
+    return div;
+  }
+
+  function chatPredict(home, away, league) {
+    lastChatRequest = { home: home, away: away, league: league };
+    setChatBusy(true);
+    var status = addMsg("status",
+      esc("Waking the model up… this can take up to a minute on the free host."),
+      chatLog);
+
+    // Wake the free host first, then ask for the prediction.
+    return fetchWithTimeout("/health", {}, 90000)
+      .catch(function () { return null; }) // health is best-effort; predict may still work
+      .then(function () {
+        status.textContent = "Model is awake — predicting…";
+        return fetchWithTimeout("/predict", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ home_team: home, away_team: away, league: league })
+        }, 120000);
+      })
+      .then(function (resp) {
+        status.remove();
+        if (resp.ok) return resp.json().then(function (d) {
+          addChatMsg("agent", renderPrediction(d));
+          // AI briefing is context only; it never changes the numbers above.
+          loadBrief(d.home_team, d.away_team, d.league, chatLog);
+        });
+        return resp.json().catch(function () { return {}; }).then(function (body) {
+          chatPredictError(home, away, body.detail || body);
+        });
+      })
+      .catch(function (err) {
+        status.remove();
+        var div = addChatMsg("error",
+          "<b>The model didn’t answer in time.</b><br>" +
+          "The free service may still be waking up — please wait a few seconds and try again. " +
+          "(" + esc(err && err.name === "AbortError" ? "request timed out" : (err && err.message) || "network error") + ")");
+        var retry = document.createElement("button");
+        retry.type = "button";
+        retry.className = "chip";
+        retry.textContent = "Retry";
+        retry.addEventListener("click", function () {
+          div.remove();
+          chatPredict(lastChatRequest.home, lastChatRequest.away, lastChatRequest.league);
+        });
+        div.appendChild(retry);
+      })
+      .finally(function () { setChatBusy(false); });
+  }
+
+  function handleChat(text) {
+    var raw = String(text || "").trim();
+    if (!raw || chatBusy) return;
+    addChatMsg("user", esc(raw));
+    var res = parseChatMessage(raw, pendingTeam);
+    if (res.kind === "greeting") { addChatMsg("agent", CHAT_GREETING); return; }
+    if (res.kind === "help") { addChatMsg("agent", CHAT_HELP); return; }
+    if (res.kind === "need-teams") {
+      addChatMsg("agent", "I need two team names to predict a match — for example " +
+        "“Arsenal vs Chelsea”. Which two teams?");
+      return;
+    }
+    if (res.kind === "same-team") {
+      addChatMsg("agent", "That’s the same team — who are " + esc(res.team) + " playing?");
+      return;
+    }
+    if (res.kind === "pending") {
+      pendingTeam = res.team;
+      addChatMsg("agent", "Got it — <b>" + esc(res.team) + "</b>. Who are they playing?");
+      return;
+    }
+    // predict
+    pendingTeam = null;
+    chatPredict(res.home, res.away, leagueSelect.value);
+  }
+
+  chatForm.addEventListener("submit", function (ev) {
+    ev.preventDefault();
+    var text = chatInput.value;
+    chatInput.value = "";
+    handleChat(text);
+    chatInput.focus();
+  });
+
+  chatbotPanel.addEventListener("click", function (ev) {
+    var chip = ev.target.closest("[data-chat]");
+    if (!chip || chatBusy) return;
+    handleChat(chip.getAttribute("data-chat"));
   });
 })();
 </script>
