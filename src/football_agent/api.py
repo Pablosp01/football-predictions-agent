@@ -915,9 +915,12 @@ def predict(req: PredictRequest) -> PredictionOut:
 def ai_brief(req: BriefRequest) -> BriefOut:
     """AI match briefing: live web search via AgentRouter, never
     predictions. The AI searches the web for the fixture and cites
-    its sources. If AgentRouter fails and a Xingchi key is set, the
-    briefing falls back to Xingchi's knowledge-only answer
-    (live_search false, no sources).
+    its sources. If AgentRouter's web firewall blocks the search
+    call from this server, it is retried once without the search
+    tool (knowledge-only answer, labelled as such); if that is
+    blocked too and a Xingchi key is set, the briefing falls back
+    to Xingchi's knowledge-only answer (live_search false, no
+    sources).
 
     Team names are used as given, so this works for any league. 503 if
     neither key is set; 502 if both services fail or time out; never
