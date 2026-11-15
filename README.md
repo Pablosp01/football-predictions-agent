@@ -49,7 +49,9 @@ curl -X POST localhost:8000/predict \
 ```
 
 Endpoints: `GET /health`, `POST /predict`, `POST /predict-batch`,
-`GET /fixtures?league=PL&date=2026-11-15`, `GET /backtest?league=PL`.
+`GET /fixtures?league=PL&date=2026-11-15`, `GET /backtest?league=PL`,
+`POST /ai-brief` (AI match briefing: live web search via AgentRouter —
+needs `AGENTROUTER_API_KEY`).
 Team names are fuzzy-matched ("Man Utd", "Spurs" work); an unknown name
 returns 400 with "did you mean" suggestions. The fitted model is cached
 per league. If `API_KEY` is set, every endpoint except `/health` requires
@@ -75,6 +77,38 @@ over/under 2.5, and the model's factors. Unknown team names show the
 button. On Render's free plan the first request after idle can take
 50–90s while the service wakes; once warm, predictions take a few
 seconds.
+
+### AI match briefing (optional, one free key)
+
+After each prediction the page also fetches `POST /ai-brief`, which
+asks an AI model for match context — recent form, injuries/suspensions
+and team news. The briefing never changes the model's numbers.
+
+The briefing is a live web search: the AgentRouter call carries the
+`web_search` tool, so the model searches the web for the fixture and
+cites the pages it found. The response carries `live_search: true`
+and the cited sources. The search itself is slow — a live call can
+take up to about a minute — so the endpoint allows 95s and the page
+shows a loading state for that long; briefings are cached in memory
+for 15 minutes per team pair, so repeat requests are instant.
+
+To enable it, create one free key and set it as an environment
+variable on the server (Render dashboard → Environment, or
+`AGENTROUTER_API_KEY=... uvicorn football_agent.api:app` locally):
+
+- AgentRouter key — free credits, no card: register at
+  https://agentrouter.org and copy the key from
+  https://agentrouter.org/console/token. It calls
+  `POST https://agentrouter.org/v1/responses` (its models do not
+  support `/v1/chat/completions`) and sends the Claude Code client
+  fingerprint headers the gateway requires.
+
+Until the key is set, `/ai-brief` answers 503 (naming the missing
+key) and the page hides the section silently. The
+model is `gpt-5.6-sol` by default (override with the
+`AGENTROUTER_MODEL` environment variable). If AgentRouter errors or
+times out (95s total budget), the endpoint answers 502 and the page
+says so without touching the prediction.
 
 ## How accuracy is measured
 

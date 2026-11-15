@@ -16,5 +16,7 @@ services:
         value: "3.12.0"
       - key: FOOTBALL_DATA_API_KEY
         sync: false
+      - key: AGENTROUTER_API_KEY
+        sync: false
       - key: API_KEY
         sync: false

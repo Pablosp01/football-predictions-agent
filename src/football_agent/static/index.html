@@ -36,6 +36,10 @@
   .scores li { display: flex; justify-content: space-between; padding: 2px 0;
                border-bottom: 1px dashed #24365a; }
   .factors { margin: 8px 0 2px; padding-left: 18px; font-size: .9rem; color: var(--muted); }
+  .sources { list-style: none; padding: 0; margin: 6px 0; font-size: .88rem; }
+  .sources li { padding: 2px 0; overflow-wrap: anywhere; }
+  .sources a { color: #7cc4ff; }
+  .brief-note { color: var(--muted); font-size: .85rem; }
   .disclaimer { font-size: .78rem; color: var(--muted); margin-top: 10px; }
   .chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
   .chip { background: var(--panel-2); border: 1px solid #2b4365; color: var(--ink);
@@ -199,6 +203,66 @@
     return addMsg("error", html);
   }
 
+  function renderBrief(d) {
+    // AI match briefing: a live web search — the AI searched the web
+    // for this match and cites its sources below. The numbers above
+    // are the model's.
+    var html = "<h3>🔍 AI match briefing</h3>" +
+      '<div class="sub">Live web search — the AI searched the web for ' +
+      "this match. The percentages and scorelines above are " +
+      "the model’s, not the AI’s.</div>";
+    if (d.summary) html += "<p>" + esc(d.summary) + "</p>";
+    function section(title, items) {
+      if (!items || !items.length) return "";
+      return "<b>" + esc(title) + "</b><ul class=\"factors\">" +
+        items.map(function (it) { return "<li>" + esc(it) + "</li>"; }).join("") +
+        "</ul>";
+    }
+    html += section("Recent form", d.form);
+    html += section("Injuries & suspensions", d.injuries);
+    html += section("Team news", d.news);
+    if (d.sources && d.sources.length) {
+      html += "<b>Sources</b><ul class=\"sources\">" + d.sources.map(function (s) {
+        var url = String(s.url || "");
+        if (url.indexOf("http://") !== 0 && url.indexOf("https://") !== 0) return "";
+        return '<li><a href="' + esc(url) + '" target="_blank" rel="noopener">' +
+          esc(s.title || url) + "</a></li>";
+      }).join("") + "</ul>";
+    }
+    if (d.searched_at) {
+      html += '<div class="disclaimer">Searched the web, as of ' + esc(d.searched_at) +
+        ".</div>";
+    }
+    return html;
+  }
+
+  function loadBrief(home, away, league) {
+    var box = addMsg("agent",
+      "<b>🔍 AI match briefing</b><br>" +
+      '<span class="sub">Searching the web for team news… this can take ' +
+      "up to a minute while the AI searches.</span>");
+    fetchWithTimeout("/ai-brief", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ home_team: home, away_team: away, league: league })
+    }, 100000)
+      .then(function (resp) {
+        if (resp.status === 503) { box.remove(); return null; } // no key yet: hide silently
+        if (!resp.ok) throw new Error("briefing unavailable");
+        return resp.json();
+      })
+      .then(function (d) {
+        if (!d) return;
+        box.innerHTML = renderBrief(d);
+        box.scrollIntoView({ block: "nearest" });
+      })
+      .catch(function () {
+        box.innerHTML = "<b>🔍 AI match briefing</b><br>" +
+          '<span class="sub">The AI briefing didn’t answer in time — ' +
+          "the model prediction above is unaffected.</span>";
+      });
+  }
+
   function fetchWithTimeout(url, options, ms) {
     var controller = new AbortController();
     var timer = setTimeout(function () { controller.abort(); }, ms);
@@ -228,6 +292,8 @@
         status.remove();
         if (resp.ok) return resp.json().then(function (d) {
           addMsg("agent", renderPrediction(d));
+          // AI briefing is context only; it never changes the numbers above.
+          loadBrief(d.home_team, d.away_team, d.league);
         });
         return resp.json().catch(function () { return {}; }).then(function (body) {
           renderError(home, away, body.detail || body);

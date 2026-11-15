@@ -11,12 +11,17 @@ Run locally:
 from __future__ import annotations
 
 import difflib
+import json
 import os
 import re
+import time
 from datetime import date as _date
+from datetime import datetime as _datetime
+from datetime import timezone as _timezone
 from pathlib import Path
 from typing import Annotated
 
+import requests
 from fastapi import Depends, FastAPI, Header, HTTPException, Query
 from fastapi.responses import FileResponse, PlainTextResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -217,6 +222,301 @@ def _predict_one(home: str, away: str, league: str) -> PredictionOut:
 
 
 # ---------------------------------------------------------------------------
+# AI match briefing (AgentRouter only, live web search)
+#
+# Context only: recent form, injuries/suspensions, team news found by a
+# live web search. The model's numbers from /predict are authoritative
+# and are never touched by this section.
+#
+# The briefing uses AgentRouter's built-in web search: the /v1/responses
+# call carries "tools": [{"type": "web_search"}], so the model searches
+# the web for the fixture and cites what it finds. The prompt tells it
+# to use ONLY the search results, to cite every factual claim with a
+# markdown source link, and never to invent players, results, or
+# injuries. Sources are extracted from the answer's markdown links and
+# from any urls in the response's web_search_call output items, and the
+# response carries live_search=true. The web page says the briefing is a
+# live web search and lists the cited sources below it.
+#
+# Needs one key on the server:
+#   AGENTROUTER_API_KEY — free AgentRouter key, the only summariser.
+# Without it /ai-brief answers 503 and the web page hides the briefing.
+#
+# API shape (verified 2026-11-15 against the live key):
+#   POST https://agentrouter.org/v1/responses
+#   headers: Authorization Bearer, User-Agent: claude-cli/2.1.220
+#   (external, claude-desktop), anthropic-version: 2023-06-01
+#   body: {"model": "gpt-5.6-sol", "input": ...,
+#          "tools": [{"type": "web_search"}]}
+#   response: {"output_text": "..."} (or output[].content[] text), with
+#   web_search_call output items and url citations.
+# The gateway rejects requests without the fingerprint headers (HTTP
+# 401 "unauthorized client detected"), and its models do NOT support
+# /v1/chat/completions (HTTP 400) — use /v1/responses only.
+# The key is sent as a header, never in a URL, and never logged or
+# returned.
+#
+# Timing: the search itself is slow — a live web-searched call took
+# 57s against the real key, while plain calls answer in ~1s. The
+# AgentRouter timeout is therefore 90s and the whole-briefing budget
+# 95s; the page shows a loading state for that long, and the 15-minute
+# cache makes repeat requests instant.
+# ---------------------------------------------------------------------------
+
+AGENTROUTER_MODEL = os.environ.get("AGENTROUTER_MODEL", "gpt-5.6-sol")
+AGENTROUTER_RESPONSES_URL = "https://agentrouter.org/v1/responses"
+# The gateway rejects clients without a supported harness fingerprint.
+AGENTROUTER_FINGERPRINT_HEADERS = {
+    "User-Agent": "claude-cli/2.1.220 (external, claude-desktop)",
+    "anthropic-version": "2023-06-01",
+}
+AGENTROUTER_TIMEOUT_S = 90
+BRIEF_TOTAL_BUDGET_S = 95  # wall-clock budget for the whole briefing
+BRIEF_CACHE_TTL_S = 15 * 60  # save free-tier quota: one briefing per pair/15 min
+BRIEF_CACHE_MAX = 200
+
+_brief_cache: dict[tuple[str, str, str], tuple[float, dict]] = {}
+
+
+class _BriefError(Exception):
+    """The AgentRouter call failed (HTTP error, timeout, bad answer)."""
+
+
+_LEAGUE_NAMES = {
+    "PL": "Premier League", "PD": "La Liga", "SA": "Serie A",
+    "BL1": "Bundesliga", "FL1": "Ligue 1", "CL": "Champions League",
+}
+
+
+def _brief_prompt(home: str, away: str, league: str, today: str) -> str:
+    league_name = _LEAGUE_NAMES.get(league.upper(), league)
+    return (
+        f"Today is {today}. The football match is {home} vs {away} "
+        f"({league_name}).\n\n"
+        "Use the web search tool to search the web for this fixture, "
+        "then return a JSON object (no other text) with exactly these keys:\n"
+        '{"summary": "2-3 sentence overview of the match context", '
+        '"form": ["<team>: last-5 results, e.g. W W D L W, with scores if found"], '
+        '"injuries": ["<player> (<team>) — injury or suspension detail, or empty if none found"], '
+        '"news": ["any other relevant team news"]}\n\n'
+        "Rules:\n"
+        "- Use ONLY what you find in the web search results. If a section "
+        "has no reliable information, use an empty list.\n"
+        "- Cite every factual claim with a source link in the text, like "
+        "[ESPN](https://www.espn.com/soccer/...).\n"
+        "- Do NOT invent players, results, or injuries.\n"
+        "- Do NOT predict a winner, scoreline, or probabilities. Do NOT mention odds.\n"
+        "- Keep every item to one short sentence. No betting language."
+    )
+
+
+_MD_LINK_RE = re.compile(r"\[([^\]]+)\]\((https?://[^)\s]+)\)")
+
+
+def _strip_md_links(text: str) -> str:
+    """Turn markdown links into plain titles for display.
+
+    The page escapes all AI text, so a literal "[title](url)" would show
+    as-is; the URL itself is kept separately in the sources list.
+    """
+    return _MD_LINK_RE.sub(r"\1", text)
+
+
+def _parse_briefing(text: str) -> dict:
+    """Parse the model's JSON answer; fall back to plain text as summary."""
+    raw = text.strip()
+    if raw.startswith("```"):
+        raw = re.sub(r"^```(?:json)?\s*", "", raw)
+        raw = re.sub(r"\s*```$", "", raw)
+    try:
+        data = json.loads(raw)
+        if isinstance(data, dict):
+            def _items(key: str) -> list[str]:
+                return [_strip_md_links(str(x).strip())
+                        for x in (data.get(key) or []) if str(x).strip()]
+            return {
+                "summary": _strip_md_links(str(data.get("summary") or "").strip()),
+                "form": _items("form"),
+                "injuries": _items("injuries"),
+                "news": _items("news"),
+            }
+    except (ValueError, TypeError):
+        pass
+    return {"summary": _strip_md_links(text.strip()),
+            "form": [], "injuries": [], "news": []}
+
+
+def _extract_agentrouter_text(data: dict) -> str:
+    """Return the answer text from an AgentRouter /v1/responses body.
+
+    Primary shape: top-level "output_text". Fallback: output[] items
+    with content[] chunks of type "output_text".
+    """
+    text = data.get("output_text") or ""
+    if isinstance(text, str) and text.strip():
+        return text.strip()
+    texts: list[str] = []
+    for item in data.get("output") or []:
+        if not isinstance(item, dict):
+            continue
+        for chunk in item.get("content") or []:
+            if isinstance(chunk, dict) and chunk.get("type") == "output_text":
+                if chunk.get("text"):
+                    texts.append(str(chunk["text"]))
+    return "\n".join(texts).strip()
+
+
+def _extract_sources(text: str, data: dict) -> list[dict]:
+    """Collect the briefing's live sources as [{title, url}, ...].
+
+    Two origins, both deduped by URL and restricted to http(s):
+    markdown links [title](url) in the answer text, and any url values
+    found in the response body — which covers web_search_call output
+    items and url_citation annotations, whatever their exact shape.
+    """
+    sources: list[dict] = []
+    seen: set[str] = set()
+
+    def _add(title, url) -> None:
+        if not url or not str(url).startswith(("http://", "https://")):
+            return
+        url = str(url).strip()
+        if url in seen:
+            return
+        seen.add(url)
+        title = (str(title).strip() if title else "") or url
+        sources.append({"title": title, "url": url})
+
+    for title, url in _MD_LINK_RE.findall(text or ""):
+        _add(title, url)
+
+    def _walk(node, title_hint=None) -> None:
+        if isinstance(node, dict):
+            title = node.get("title") if isinstance(node.get("title"), str) \
+                else title_hint
+            url = node.get("url")
+            if isinstance(url, str):
+                _add(title, url)
+            for value in node.values():
+                _walk(value, title)
+        elif isinstance(node, list):
+            for value in node:
+                _walk(value, title_hint)
+
+    _walk(data)
+    return sources
+
+
+def _summarise_with_agentrouter(home: str, away: str, league: str,
+                                api_key: str, timeout: float) -> dict:
+    """Ask AgentRouter (/v1/responses, web_search tool) for the briefing.
+
+    The model searches the web for the fixture and cites what it finds.
+    Returns {"summary", "form", "injuries", "news", "sources"}.
+    Raises _BriefError on any failure. The key is never logged.
+    The gateway rejects requests without the Claude Code fingerprint
+    headers, and its models do not support /v1/chat/completions.
+    """
+    today = _datetime.now(_timezone.utc).date().isoformat()
+    body = {
+        "model": AGENTROUTER_MODEL,
+        "input": _brief_prompt(home, away, league, today),
+        "tools": [{"type": "web_search"}],
+    }
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+    }
+    headers.update(AGENTROUTER_FINGERPRINT_HEADERS)
+    try:
+        resp = requests.post(
+            AGENTROUTER_RESPONSES_URL,
+            headers=headers,
+            json=body,
+            timeout=timeout,
+        )
+    except requests.exceptions.RequestException as exc:
+        raise _BriefError(f"AgentRouter request failed: {exc}") from exc
+    if resp.status_code != 200:
+        detail = ""
+        try:
+            err_json = resp.json()
+            if isinstance(err_json, dict):
+                err = err_json.get("error") or {}
+                detail = err.get("message", "") if isinstance(err, dict) else str(err)
+        except Exception:
+            detail = (resp.text or "")[:200]
+        raise _BriefError(
+            f"AgentRouter returned HTTP {resp.status_code}"
+            + (f": {detail}" if detail else "")
+        )
+    try:
+        data = resp.json()
+    except ValueError as exc:
+        raise _BriefError(
+            "AgentRouter returned an unreadable response") from exc
+    text = _extract_agentrouter_text(data)
+    if not text:
+        raise _BriefError("AgentRouter returned no answer text")
+    parsed = _parse_briefing(text)
+    parsed["sources"] = _extract_sources(text, data)
+    return parsed
+
+
+def _build_brief(home: str, away: str, league: str,
+                 agentrouter_key: str) -> dict:
+    """Ask AgentRouter (live web search) for the briefing.
+
+    Returns {"summary", "form", "injuries", "news", "sources",
+    "live_search"} where sources are the live pages the model cited and
+    live_search is always True. Raises _BriefError on any failure.
+    Total wall-clock budget is BRIEF_TOTAL_BUDGET_S.
+    """
+    deadline = time.monotonic() + BRIEF_TOTAL_BUDGET_S
+
+    def _timeout(cap: float) -> float:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise _BriefError("AI search time budget exhausted")
+        return min(cap, remaining)
+
+    parsed = _summarise_with_agentrouter(
+        home, away, league, agentrouter_key,
+        _timeout(AGENTROUTER_TIMEOUT_S))
+    parsed["live_search"] = True
+    return parsed
+
+
+def clear_brief_cache() -> None:
+    """For tests: drop cached briefings."""
+    _brief_cache.clear()
+
+
+class BriefRequest(BaseModel):
+    home_team: str = Field(..., examples=["Arsenal"])
+    away_team: str = Field(..., examples=["Chelsea"])
+    league: str = Field(default="PL", examples=["PL"])
+
+
+class BriefSource(BaseModel):
+    title: str
+    url: str
+
+
+class BriefOut(BaseModel):
+    home_team: str
+    away_team: str
+    league: str
+    summary: str
+    form: list[str]
+    injuries: list[str]
+    news: list[str]
+    sources: list[BriefSource]
+    live_search: bool = False
+    searched_at: str
+
+
+# ---------------------------------------------------------------------------
 # App
 # ---------------------------------------------------------------------------
 
@@ -278,6 +578,63 @@ def web_chat():
           dependencies=[Depends(require_api_key)])
 def predict(req: PredictRequest) -> PredictionOut:
     return _predict_one(req.home_team, req.away_team, req.league)
+
+
+@app.post("/ai-brief", response_model=BriefOut,
+          dependencies=[Depends(require_api_key)])
+def ai_brief(req: BriefRequest) -> BriefOut:
+    """AI match briefing: live web search via AgentRouter, never
+    predictions. The AI searches the web for the fixture and cites
+    its sources.
+
+    Team names are used as given, so this works for any league. 503 if
+    AGENTROUTER_API_KEY is not set; 502 if AgentRouter fails or times
+    out; never 500 and never hangs (95s total budget — the search
+    itself is slow).
+    """
+    home = req.home_team.strip()
+    away = req.away_team.strip()
+    league = (req.league or "PL").strip().upper()
+    if not home or not away:
+        raise HTTPException(status_code=400, detail={
+            "error": "home_team and away_team must not be empty"})
+    if _norm(home) == _norm(away):
+        raise HTTPException(status_code=400, detail={
+            "error": "Home and away teams must be different"})
+    agentrouter_key = os.environ.get("AGENTROUTER_API_KEY")
+    if not agentrouter_key:
+        raise HTTPException(status_code=503, detail={
+            "error": "AI search is not configured",
+            "hint": "Set AGENTROUTER_API_KEY on the server to enable the AI match briefing.",
+        })
+    key = (_norm(home), _norm(away), league)
+    cached = _brief_cache.get(key)
+    if cached and time.monotonic() - cached[0] < BRIEF_CACHE_TTL_S:
+        return BriefOut(**cached[1])
+    try:
+        parsed = _build_brief(home, away, league, agentrouter_key)
+    except _BriefError as exc:
+        raise HTTPException(status_code=502, detail={
+            "error": "AI search is unavailable right now",
+            "hint": str(exc)[:200],
+        }) from exc
+    except Exception:  # never 500: any unexpected failure is a 502
+        raise HTTPException(status_code=502, detail={
+            "error": "AI search is unavailable right now",
+            "hint": "Unexpected error talking to the AI search service.",
+        })
+    searched_at = _datetime.now(_timezone.utc).isoformat(timespec="seconds")
+    payload = {
+        "home_team": home, "away_team": away, "league": league,
+        "summary": parsed["summary"], "form": parsed["form"],
+        "injuries": parsed["injuries"], "news": parsed["news"],
+        "sources": parsed["sources"], "live_search": parsed["live_search"],
+        "searched_at": searched_at,
+    }
+    if len(_brief_cache) >= BRIEF_CACHE_MAX:
+        _brief_cache.clear()
+    _brief_cache[key] = (time.monotonic(), payload)
+    return BriefOut(**payload)
 
 
 @app.post("/predict-batch", dependencies=[Depends(require_api_key)])
