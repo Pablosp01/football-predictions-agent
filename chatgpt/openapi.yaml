@@ -40,7 +40,10 @@ paths:
       description: |
         Returns the model's home/draw/away probabilities, expected goals,
         most likely scoreline, top-5 scorelines, BTTS and over/under 2.5
-        probabilities, confidence and the top driving factors. These numbers
+        probabilities, confidence and the top driving factors. It also
+        returns the goals-total markets (over/under for lines 1.5, 2.5
+        and 3.5), the model's single most confident totals call
+        (top_pick) and the most likely 1X2 outcome (match_pick). These numbers
         are the prediction. Team names are fuzzy-matched ("Man Utd",
         "Man United", "Spurs" all work); an unknown name returns a 400 with
         "did you mean" suggestions — use one of those and call again.
@@ -199,6 +202,25 @@ components:
               prob: { type: number, example: 0.133 }
         p_btts: { type: number, example: 0.525, description: "Both teams to score" }
         p_over_25: { type: number, example: 0.483, description: "Over 2.5 total goals" }
+        totals:
+          type: object
+          description: "Over/under probabilities per total-goals line, from the scoreline distribution"
+          properties:
+            "1.5": { type: object, properties: { over: { type: number, example: 0.7455 }, under: { type: number, example: 0.2545 } } }
+            "2.5": { type: object, properties: { over: { type: number, example: 0.4827 }, under: { type: number, example: 0.5173 } } }
+            "3.5": { type: object, properties: { over: { type: number, example: 0.265 }, under: { type: number, example: 0.735 } } }
+        top_pick:
+          type: object
+          description: "The model's single most confident totals call"
+          properties:
+            market: { type: string, example: "Over 1.5" }
+            probability: { type: number, example: 0.7455 }
+        match_pick:
+          type: object
+          description: "The most likely 1X2 outcome"
+          properties:
+            outcome: { type: string, enum: [home, draw, away], example: home }
+            probability: { type: number, example: 0.476 }
         factors:
           type: array
           items: { type: string }

@@ -12,6 +12,54 @@ from .elo import EloRatings
 from .features import form_points, goals_per_game, head_to_head, rest_days
 from .poisson import DixonColesModel
 
+# Goals-total lines the model prices from the scoreline matrix. A line of
+# 1.5 means "total goals > 1.5" (i.e. 2+ goals); 3.5 means 4+ goals.
+TOTALS_LINES = (1.5, 2.5, 3.5)
+
+
+def totals_from_matrix(matrix) -> dict[str, dict[str, float]]:
+    """Over/under probabilities per line, summed from a scoreline matrix.
+
+    For each line, over = P(total goals > line), under = 1 - over. Every
+    cell of the matrix is either over or under a line, so over + under
+    is exactly 1 (up to float error) for each line.
+    """
+    totals: dict[str, dict[str, float]] = {}
+    for line in TOTALS_LINES:
+        over = float(sum(matrix[h, a] for h in range(11) for a in range(11)
+                         if h + a > line))
+        totals[f"{line:.1f}"] = {"over": over, "under": 1.0 - over}
+    return totals
+
+
+def top_pick_from_totals(totals: dict[str, dict[str, float]]) -> dict:
+    """The single most confident totals call among the six over/under sides.
+
+    Returns {"market": "Over 1.5", "probability": p}. Ties prefer the
+    lower line, then Over — the iteration order (lines ascending, Over
+    before Under) plus a strict-greater comparison gives that for free.
+    """
+    best_market, best_prob = "Over 1.5", 0.0
+    for line in TOTALS_LINES:
+        key = f"{line:.1f}"
+        for side in ("over", "under"):
+            p = totals[key][side]
+            if p > best_prob:
+                best_prob = p
+                best_market = f"{'Over' if side == 'over' else 'Under'} {key}"
+    return {"market": best_market, "probability": best_prob}
+
+
+def match_pick_from_probs(p_home: float, p_draw: float, p_away: float) -> dict:
+    """The most likely 1X2 outcome: {"outcome": "home"|"draw"|"away",
+    "probability": p}. Ties prefer home, then draw, then away."""
+    outcome, prob = "home", p_home
+    if p_draw > prob:
+        outcome, prob = "draw", p_draw
+    if p_away > prob:
+        outcome, prob = "away", p_away
+    return {"outcome": outcome, "probability": prob}
+
 
 @dataclass
 class Prediction:
@@ -26,6 +74,9 @@ class Prediction:
     p_btts: float
     p_over_25: float
     confidence: float
+    totals: dict[str, dict[str, float]]
+    top_pick: dict
+    match_pick: dict
     factors: list[str]
 
     @property
@@ -41,6 +92,13 @@ class Prediction:
             "most_likely": self.most_likely,
             "p_btts": round(self.p_btts, 4), "p_over_25": round(self.p_over_25, 4),
             "confidence": round(self.confidence, 4),
+            "totals": {line: {"over": round(sides["over"], 4),
+                              "under": round(1.0 - round(sides["over"], 4), 4)}
+                       for line, sides in self.totals.items()},
+            "top_pick": {"market": self.top_pick["market"],
+                         "probability": round(self.top_pick["probability"], 4)},
+            "match_pick": {"outcome": self.match_pick["outcome"],
+                           "probability": round(self.match_pick["probability"], 4)},
             "top_scorelines": [(s, round(p, 4)) for s, p in self.top_scorelines],
             "factors": self.factors,
         }
@@ -123,7 +181,11 @@ class Predictor:
         flat = sorted(((f"{h}-{a}", float(matrix[h, a])) for h in range(7) for a in range(7)),
                       key=lambda t: t[1], reverse=True)[:5]
         p_btts = float(sum(matrix[h, a] for h in range(1, 11) for a in range(1, 11)))
-        p_over = float(sum(matrix[h, a] for h in range(11) for a in range(11) if h + a > 2.5))
+        totals = totals_from_matrix(matrix)
+        p_over = totals["2.5"]["over"]
         confidence = float(max(p_home, p_draw, p_away))
         return Prediction(home, away, p_home, p_draw, p_away, xh, xa,
-                          flat, p_btts, p_over, confidence, factors[:3])
+                          flat, p_btts, p_over, confidence,
+                          totals, top_pick_from_totals(totals),
+                          match_pick_from_probs(p_home, p_draw, p_away),
+                          factors[:3])

@@ -192,6 +192,14 @@ class PredictionOut(BaseModel):
     top_scorelines: list[dict]
     p_btts: float
     p_over_25: float
+    # Goals-total markets: {"1.5": {"over": p, "under": 1-p}, ...} for
+    # lines 1.5 / 2.5 / 3.5, summed from the scoreline distribution.
+    totals: dict
+    # The model's single most confident totals call, e.g.
+    # {"market": "Over 1.5", "probability": 0.83}.
+    top_pick: dict
+    # The most likely 1X2 outcome, e.g. {"outcome": "home", "probability": 0.476}.
+    match_pick: dict
     factors: list[str]
     source: str = "model"
     disclaimer: str = DISCLAIMER
@@ -206,6 +214,7 @@ def _prediction_out(pred, league: str) -> PredictionOut:
         most_likely=d["most_likely"], confidence=d["confidence"],
         top_scorelines=[{"score": s, "prob": p} for s, p in d["top_scorelines"]],
         p_btts=d["p_btts"], p_over_25=d["p_over_25"], factors=d["factors"],
+        totals=d["totals"], top_pick=d["top_pick"], match_pick=d["match_pick"],
     )
 
 

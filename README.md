@@ -25,7 +25,7 @@ Or install the entry point: `pip install -e .` then use `football-predict`.
 
 | Command | What it does |
 |---|---|
-| `football-predict predict --home Arsenal --away Chelsea` | 1X2 probs, xG, top-5 scorelines, BTTS, over/under 2.5, confidence + top-3 factors |
+| `football-predict predict --home Arsenal --away Chelsea` | 1X2 probs, xG, top-5 scorelines, BTTS, over/under 1.5 / 2.5 / 3.5, model's top pick + confidence + top-3 factors |
 | `football-predict fixtures --league PL --date 2026-11-15` | Predict that day's fixtures (live API) |
 | `football-predict backtest --league PL` | Walk-forward backtest on history |
 | `football-predict evaluate --league PL` | Backtest + plain-language verdict |
@@ -72,7 +72,12 @@ The page is a chat: it shows a "waking the model up…" state, calls
 `GET /health` first to wake the free host, then `POST /predict`, and
 renders the reply as a chat bubble with win/draw/away % bars, expected
 goals, most likely outcome + confidence, top-5 scorelines, BTTS and
-over/under 2.5, and the model's factors. Unknown team names show the
+over/under 2.5, and the model's factors. It also shows a "Model's picks"
+section: the match pick (the most likely 1X2 outcome), BTTS Yes/No with
+both probabilities, and the over/under probabilities for total-goals
+lines 1.5, 2.5 and 3.5 — with the model's single most confident totals
+call badged as the pick. All of it is model probabilities, never betting
+recommendations. Unknown team names show the
 "did you mean" suggestions as clickable chips; timeouts offer a Retry
 button. On Render's free plan the first request after idle can take
 50–90s while the service wakes; once warm, predictions take a few
@@ -161,6 +166,13 @@ on the bundled sample data.
 
 Output per match: P(home/draw/away), xG both teams, top-5 scorelines, P(BTTS),
 P(over 2.5), confidence (max outcome prob), and the top 3 driving factors.
+Goals-total markets are also priced from the scoreline distribution:
+`totals` gives over/under probabilities for lines 1.5, 2.5 and 3.5
+(`{"1.5": {"over": p, "under": 1-p}, ...}`), `top_pick` is the model's
+single most confident totals call (`{"market": "Over 1.5",
+"probability": p}`), and `match_pick` is the most likely 1X2 outcome
+(`{"outcome": "home"|"draw"|"away", "probability": p}`). The legacy
+`p_btts` and `p_over_25` fields are unchanged.
 
 ## Limitations
 

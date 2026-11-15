@@ -36,6 +36,12 @@
   .scores li { display: flex; justify-content: space-between; padding: 2px 0;
                border-bottom: 1px dashed #24365a; }
   .factors { margin: 8px 0 2px; padding-left: 18px; font-size: .9rem; color: var(--muted); }
+  .picks { margin: 10px 0 4px; font-size: .92rem; }
+  .picks h4 { margin: 6px 0 4px; font-size: .95rem; }
+  .picks .row { padding: 3px 0; border-bottom: 1px dashed #24365a; }
+  .picks .row:last-child { border-bottom: 0; }
+  .badge { background: var(--green); color: #06130a; font-size: .72rem; font-weight: 700;
+           border-radius: 999px; padding: 2px 8px; margin-left: 6px; white-space: nowrap; }
   .sources { list-style: none; padding: 0; margin: 6px 0; font-size: .88rem; }
   .sources li { padding: 2px 0; overflow-wrap: anywhere; }
   .sources a { color: #7cc4ff; }
@@ -138,8 +144,8 @@
   addMsg("agent",
     "<b>Hi — I predict matches from results data, not guesswork.</b><br>" +
     "Type a home team and an away team below (nicknames work: “Man Utd”, “Spurs”). " +
-    "I’ll wake the model, then show you the win / draw / away percentages, expected goals " +
-    "and the most likely scorelines.");
+    "I’ll wake the model, then show you the win / draw / away percentages, expected goals, " +
+    "the most likely scorelines, and the model’s picks for the match and the goals totals.");
 
   function norm(s) { return String(s).trim().toLowerCase(); }
 
@@ -163,12 +169,38 @@
       '<div class="sub">' + esc(d.league) + " — most likely: <b>" + esc(pickName) +
       "</b> (" + pct(d.confidence) + " confidence)</div>" +
       rows +
+      '<div class="picks">' + renderPicks(d) + "</div>" +
       '<div class="facts">Expected goals: <b>' + d.xg_home.toFixed(2) + " – " +
       d.xg_away.toFixed(2) + "</b> &nbsp;·&nbsp; Both teams to score: <b>" + pct(d.p_btts) +
       "</b> &nbsp;·&nbsp; Over 2.5 goals: <b>" + pct(d.p_over_25) + "</b></div>" +
       "<b>Most likely scorelines</b><ul class=\"scores\">" + scores + "</ul>" +
       (factors ? "<b>Why:</b><ul class=\"factors\">" + factors + "</ul>" : "") +
       '<div class="disclaimer">' + esc(d.disclaimer || "Statistical model output, not betting advice.") + "</div>";
+  }
+
+  function renderPicks(d) {
+    // "Model's picks": the match pick, BTTS both sides, and the three
+    // goals-total lines — with the model's single most confident totals
+    // call badged. All model probabilities, never betting recommendations.
+    if (!d.totals || !d.top_pick || !d.match_pick) return "";
+    var matchLabel = d.match_pick.outcome === "home" ? esc(d.home_team) + " win"
+      : d.match_pick.outcome === "away" ? esc(d.away_team) + " win" : "Draw";
+    var lines = ["1.5", "2.5", "3.5"].map(function (line) {
+      var sides = d.totals[line];
+      if (!sides) return "";
+      var overTop = d.top_pick.market === "Over " + line;
+      var underTop = d.top_pick.market === "Under " + line;
+      return '<div class="row">Over ' + line + " goals: <b>" + pct(sides.over) + "</b>" +
+        (overTop ? '<span class="badge">Model’s pick</span>' : "") +
+        " &nbsp;·&nbsp; Under " + line + " goals: <b>" + pct(sides.under) + "</b>" +
+        (underTop ? '<span class="badge">Model’s pick</span>' : "") + "</div>";
+    }).join("");
+    return "<h4>🎯 Model’s picks</h4>" +
+      '<div class="row">Match: <b>' + matchLabel + "</b> — " +
+      pct(d.match_pick.probability) + "</div>" +
+      '<div class="row">Both teams to score: <b>Yes ' + pct(d.p_btts) +
+      "</b> &nbsp;·&nbsp; No <b>" + pct(1 - d.p_btts) + "</b></div>" +
+      lines;
   }
 
   function renderError(home, away, detail) {
