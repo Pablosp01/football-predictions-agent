@@ -514,7 +514,9 @@ def test_ai_brief_empty_body_502(monkeypatch):
 
 def test_ai_brief_waf_html_body_502(monkeypatch):
     """AgentRouter 200 with an HTML (web firewall) body: 502 naming
-    the firewall, and no retry — the second attempt gets the same page."""
+    the firewall. The search call is retried once WITHOUT the search
+    tool (knowledge prompt); the same HTML page comes back, so the
+    endpoint gives up with the firewall hint."""
     _set_keys(monkeypatch, agentrouter=True, xingchi=False)
     with _client() as client, patch(
             "football_agent.api.requests.post",
@@ -525,7 +527,69 @@ def test_ai_brief_waf_html_body_502(monkeypatch):
         r = _post_brief(client)
     assert r.status_code == 502, r.text
     assert "web firewall" in r.json()["detail"]["hint"]
-    assert mock_post.call_count == 1
+    assert mock_post.call_count == 2
+    assert "tools" not in mock_post.call_args_list[1][1]["json"]
+    assert "no web access" in mock_post.call_args_list[1][1]["json"]["input"]
+
+
+_WAF_HTML = _FakeResponse(
+    200, None, text="<html>challenge page</html>",
+    headers={"Content-Type": "text/html; charset=utf-8"})
+
+
+def test_ai_brief_waf_falls_back_to_plain_agentrouter(monkeypatch):
+    """Firewall blocks the search call, but a plain AgentRouter call
+    (knowledge prompt, no tools) answers: knowledge-only briefing."""
+    _set_keys(monkeypatch, agentrouter=True, xingchi=False)
+    calls = {"n": 0}
+
+    def flaky(url, **kwargs):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return _WAF_HTML
+        return _FakeResponse(200, FAKE_AGENTROUTER_OK)
+
+    with _client() as client, patch(
+            "football_agent.api.requests.post",
+            side_effect=flaky) as mock_post:
+        r = _post_brief(client)
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert "good form" in body["summary"]
+    assert body["live_search"] is False
+    assert body["sources"] == []
+    assert mock_post.call_count == 2
+    first = mock_post.call_args_list[0][1]["json"]
+    assert first["tools"] == [{"type": "web_search"}]
+    second = mock_post.call_args_list[1][1]["json"]
+    assert "tools" not in second
+    assert "no web access" in second["input"]
+
+
+def test_ai_brief_waf_then_xingchi(monkeypatch):
+    """Firewall blocks the search call, the plain retry fails too,
+    Xingchi answers: knowledge-only briefing."""
+    _set_keys(monkeypatch)
+    calls = {"n": 0}
+
+    def flaky(url, **kwargs):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return _WAF_HTML
+        if url == api.XINGCHI_CHAT_URL:
+            return _FakeResponse(200, FAKE_XINGCHI_OK)
+        return _FakeResponse(500, {"error": {"message": "gateway error"}})
+
+    with _client() as client, patch(
+            "football_agent.api.requests.post",
+            side_effect=flaky) as mock_post:
+        r = _post_brief(client)
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert "good form" in body["summary"]
+    assert body["live_search"] is False
+    assert body["sources"] == []
+    assert mock_post.call_count == 3
 
 
 def test_ai_brief_non_json_body_retried_502(monkeypatch):

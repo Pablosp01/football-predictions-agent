@@ -367,12 +367,16 @@ class _BriefError(Exception):
     ``retryable`` says whether a second attempt could help. A web
     firewall page or an empty body will not change on an immediate
     retry, so those are not retryable; a transport error or a
-    transient bad reply is.
+    transient bad reply is. ``waf`` marks a web firewall challenge
+    page: the gateway may still answer a plain call without the
+    search tool, so that is worth one try.
     """
 
-    def __init__(self, message: str, retryable: bool = True):
+    def __init__(self, message: str, retryable: bool = True,
+                 waf: bool = False):
         super().__init__(message)
         self.retryable = retryable
+        self.waf = waf
 
 
 _LEAGUE_NAMES = {
@@ -554,21 +558,36 @@ def _http_error_detail(resp) -> str:
 
 
 def _summarise_with_agentrouter(home: str, away: str, league: str,
-                                api_key: str, timeout: float) -> dict:
-    """Ask AgentRouter (/v1/responses, web_search tool) for the briefing.
+                                api_key: str, timeout: float,
+                                use_search: bool = True) -> dict:
+    """Ask AgentRouter (/v1/responses) for the briefing.
 
-    The model searches the web for the fixture and cites what it finds.
+    With ``use_search`` (default) the call carries the web_search
+    tool: the model searches the web for the fixture and cites what
+    it finds. Without it the call is plain and the knowledge prompt
+    is used instead — the answer is from what the model knows, with
+    no live search. That plain form is the fallback when the
+    gateway's web firewall blocks the search call from this server
+    (it answers HTTP 200 with an HTML challenge page): the firewall
+    may still let a plain call through, and a knowledge-only
+    briefing beats no briefing.
+
     Returns {"summary", "form", "injuries", "news", "sources"}.
     Raises _BriefError on any failure. The key is never logged.
     The gateway rejects requests without the Claude Code fingerprint
     headers, and its models do not support /v1/chat/completions.
     """
     today = _datetime.now(_timezone.utc).date().isoformat()
+    if use_search:
+        prompt = _brief_prompt(home, away, league, today)
+    else:
+        prompt = _brief_prompt_knowledge(home, away, league, today)
     body = {
         "model": AGENTROUTER_MODEL,
-        "input": _brief_prompt(home, away, league, today),
-        "tools": [{"type": "web_search"}],
+        "input": prompt,
     }
+    if use_search:
+        body["tools"] = [{"type": "web_search"}]
     headers = {
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json",
@@ -619,7 +638,7 @@ def _summarise_with_agentrouter(home: str, away: str, league: str,
             # immediate retry gets the same page, so do not retry.
             raise _BriefError(
                 "AgentRouter is blocking requests from this server "
-                "(web firewall)", retryable=False) from exc
+                "(web firewall)", retryable=False, waf=True) from exc
         if not body_text.strip():
             raise _BriefError(
                 "AgentRouter returned an empty response",
@@ -736,6 +755,10 @@ def _build_brief(home: str, away: str, league: str,
     has already spent the budget and is not retried, and a
     non-retryable one (web firewall page, empty body) is never
     retried — the immediate second attempt gets the same page.
+    The exception is a firewall block: the search call is retried
+    once WITHOUT the search tool (knowledge prompt), because the
+    firewall may still let a plain call through, and a
+    knowledge-only briefing beats none.
     """
     started = time.monotonic()
     deadline = started + BRIEF_TOTAL_BUDGET_S
@@ -754,7 +777,21 @@ def _build_brief(home: str, away: str, league: str,
             parsed["live_search"] = True
             return parsed
         except _BriefError as first_error:
-            if (first_error.retryable and
+            if first_error.waf:
+                # The firewall blocked the search call; try once
+                # without the search tool (knowledge prompt). The
+                # firewall may let a plain call through, and the
+                # result is honestly labelled knowledge-only.
+                try:
+                    parsed = _summarise_with_agentrouter(
+                        home, away, league, agentrouter_key,
+                        _timeout(AGENTROUTER_TIMEOUT_S), use_search=False)
+                    parsed["live_search"] = False
+                    parsed["sources"] = []
+                    return parsed
+                except _BriefError:
+                    pass
+            elif (first_error.retryable and
                     time.monotonic() - started < AGENTROUTER_FAST_RETRY_S):
                 try:
                     parsed = _summarise_with_agentrouter(
