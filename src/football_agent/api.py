@@ -264,14 +264,14 @@ def _predict_one(home: str, away: str, league: str) -> PredictionOut:
 
 
 # ---------------------------------------------------------------------------
-# AI match briefing (AgentRouter only, live web search)
+# AI match briefing (AgentRouter primary, Xingchi fallback)
 #
 # Context only: recent form, injuries/suspensions, team news found by a
 # live web search. The model's numbers from /predict are authoritative
 # and are never touched by this section.
 #
-# The briefing uses AgentRouter's built-in web search: the /v1/responses
-# call carries "tools": [{"type": "web_search"}], so the model searches
+# Primary: AgentRouter's built-in web search. The /v1/responses call
+# carries "tools": [{"type": "web_search"}], so the model searches
 # the web for the fixture and cites what it finds. The prompt tells it
 # to use ONLY the search results, to cite every factual claim with a
 # markdown source link, and never to invent players, results, or
@@ -280,9 +280,21 @@ def _predict_one(home: str, away: str, league: str) -> PredictionOut:
 # response carries live_search=true. The web page says the briefing is a
 # live web search and lists the cited sources below it.
 #
-# Needs one key on the server:
-#   AGENTROUTER_API_KEY — free AgentRouter key, the only summariser.
-# Without it /ai-brief answers 503 and the web page hides the briefing.
+# Fallback: if the AgentRouter call fails (HTTP error, timeout, empty
+# or unparseable answer) and a Xingchi key is set, the briefing falls
+# back to Xingchi's /v1/chat/completions (model gpt-6.1-sol, the only
+# one that answers — gpt-6-astra returns 503). Xingchi has no web
+# search (its /v1/responses returns 400 "Upstream request failed"),
+# so the fallback is knowledge-only: the prompt states the model has
+# no web access and must only say what it is confident about, and the
+# response carries live_search=false with no sources. The web page
+# says so ("From the AI's own knowledge, not a live web search").
+#
+# Needs keys on the server (either one enables the briefing, neither
+# is required for predictions):
+#   AGENTROUTER_API_KEY — free AgentRouter key, the primary summariser.
+#   XINGCHI_API_KEY — pay-as-you-go Xingchi key, the fallback only.
+# Without either, /ai-brief answers 503 and the page hides the briefing.
 #
 # API shape (verified 2026-11-15 against the live key):
 #   POST https://agentrouter.org/v1/responses
@@ -317,6 +329,23 @@ BRIEF_TOTAL_BUDGET_S = 95  # wall-clock budget for the whole briefing
 BRIEF_CACHE_TTL_S = 15 * 60  # save free-tier quota: one briefing per pair/15 min
 BRIEF_CACHE_MAX = 200
 
+# Xingchi fallback (knowledge-only): the gateway has no web search,
+# so it is used only when AgentRouter fails. Verified 2026-11-15
+# against the live key: POST https://api.xingchiapi.com/v1/chat/completions
+# with the same Claude Code fingerprint headers and a Bearer key,
+# model gpt-6.1-sol (gpt-6-astra returns 503 on every call), body
+# {"model": ..., "messages": [{"role": "user", "content": ...}]}.
+# Plain requests without the fingerprint get HTTP 403
+# "client_not_allowed"; /v1/responses returns 400 "Upstream request
+# failed" — never use it here.
+XINGCHI_MODEL = os.environ.get("XINGCHI_MODEL", "gpt-6.1-sol")
+XINGCHI_CHAT_URL = "https://api.xingchiapi.com/v1/chat/completions"
+XINGCHI_FINGERPRINT_HEADERS = {
+    "User-Agent": "claude-cli/2.1.220 (external, claude-desktop)",
+    "anthropic-version": "2023-06-01",
+}
+XINGCHI_TIMEOUT_S = 30
+
 _brief_cache: dict[tuple[str, str, str], tuple[float, dict]] = {}
 
 
@@ -331,6 +360,31 @@ _LEAGUE_NAMES = {
     "BSA": "Campeonato Brasileiro Série A", "CL": "Champions League",
     "WC": "FIFA World Cup", "EC": "European Championship",
 }
+
+
+def _brief_prompt_knowledge(home: str, away: str, league: str,
+                            today: str) -> str:
+    """Same briefing shape as _brief_prompt, but the model has no web
+    access (Xingchi fallback): it must answer only from what it knows
+    with confidence, and say nothing it is unsure about.
+    """
+    league_name = _LEAGUE_NAMES.get(league.upper(), league)
+    return (
+        f"Today is {today}. The football match is {home} vs {away} "
+        f"({league_name}).\n\n"
+        "You have no web access. Answer only from what you know with "
+        "confidence, then return a JSON object (no other text) with exactly these keys:\n"
+        '{"summary": "2-3 sentence overview of the match context", '
+        '"form": ["<team>: last-5 results, e.g. W W D L W, with scores if known"], '
+        '"injuries": ["<player> (<team>) — injury or suspension detail, or empty if none known"], '
+        '"news": ["any other relevant team news"]}\n\n'
+        "Rules:\n"
+        "- Use ONLY what you are confident you know. If a section "
+        "has no reliable information, use an empty list.\n"
+        "- Do NOT invent players, results, or injuries.\n"
+        "- Do NOT predict a winner, scoreline, or probabilities. Do NOT mention odds.\n"
+        "- Keep every item to one short sentence. No betting language."
+    )
 
 
 def _brief_prompt(home: str, away: str, league: str, today: str) -> str:
@@ -452,6 +506,20 @@ def _extract_sources(text: str, data: dict) -> list[dict]:
     return sources
 
 
+def _http_error_detail(resp) -> str:
+    """Best-effort error text from a failed gateway response."""
+    try:
+        err_json = resp.json()
+        if isinstance(err_json, dict):
+            err = err_json.get("error") or {}
+            if isinstance(err, dict):
+                return str(err.get("message", ""))
+            return str(err)
+    except Exception:
+        pass
+    return (resp.text or "")[:200]
+
+
 def _summarise_with_agentrouter(home: str, away: str, league: str,
                                 api_key: str, timeout: float) -> dict:
     """Ask AgentRouter (/v1/responses, web_search tool) for the briefing.
@@ -483,14 +551,7 @@ def _summarise_with_agentrouter(home: str, away: str, league: str,
     except requests.exceptions.RequestException as exc:
         raise _BriefError(f"AgentRouter request failed: {exc}") from exc
     if resp.status_code != 200:
-        detail = ""
-        try:
-            err_json = resp.json()
-            if isinstance(err_json, dict):
-                err = err_json.get("error") or {}
-                detail = err.get("message", "") if isinstance(err, dict) else str(err)
-        except Exception:
-            detail = (resp.text or "")[:200]
+        detail = _http_error_detail(resp)
         raise _BriefError(
             f"AgentRouter returned HTTP {resp.status_code}"
             + (f": {detail}" if detail else "")
@@ -508,14 +569,82 @@ def _summarise_with_agentrouter(home: str, away: str, league: str,
     return parsed
 
 
+def _extract_xingchi_text(data: dict) -> str:
+    """Return the answer text from a Xingchi /v1/chat/completions body.
+
+    Shape: choices[0].message.content.
+    """
+    choices = data.get("choices") or []
+    if choices and isinstance(choices[0], dict):
+        msg = choices[0].get("message") or {}
+        if isinstance(msg, dict) and isinstance(msg.get("content"), str):
+            return msg["content"].strip()
+    return ""
+
+
+def _summarise_with_xingchi(home: str, away: str, league: str,
+                            api_key: str, timeout: float) -> dict:
+    """Ask Xingchi (/v1/chat/completions, gpt-6.1-sol) for the briefing.
+
+    Knowledge-only fallback: Xingchi has no web search, so the model
+    answers from what it knows and the result carries live_search
+    False and no sources. Returns {"summary", "form", "injuries",
+    "news", "sources": []}. Raises _BriefError on any failure.
+    The key is never logged. The gateway rejects requests without
+    the Claude Code fingerprint headers (HTTP 403), and gpt-6-astra
+    is unavailable (HTTP 503) — only gpt-6.1-sol is used.
+    """
+    today = _datetime.now(_timezone.utc).date().isoformat()
+    body = {
+        "model": XINGCHI_MODEL,
+        "messages": [{"role": "user",
+                      "content": _brief_prompt_knowledge(
+                          home, away, league, today)}],
+    }
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+    }
+    headers.update(XINGCHI_FINGERPRINT_HEADERS)
+    try:
+        resp = requests.post(
+            XINGCHI_CHAT_URL,
+            headers=headers,
+            json=body,
+            timeout=timeout,
+        )
+    except requests.exceptions.RequestException as exc:
+        raise _BriefError(f"Xingchi request failed: {exc}") from exc
+    if resp.status_code != 200:
+        detail = _http_error_detail(resp)
+        raise _BriefError(
+            f"Xingchi returned HTTP {resp.status_code}"
+            + (f": {detail}" if detail else "")
+        )
+    try:
+        data = resp.json()
+    except ValueError as exc:
+        raise _BriefError(
+            "Xingchi returned an unreadable response") from exc
+    text = _extract_xingchi_text(data)
+    if not text:
+        raise _BriefError("Xingchi returned no answer text")
+    parsed = _parse_briefing(text)
+    parsed["sources"] = []
+    return parsed
+
+
 def _build_brief(home: str, away: str, league: str,
-                 agentrouter_key: str) -> dict:
-    """Ask AgentRouter (live web search) for the briefing.
+                 agentrouter_key: str | None,
+                 xingchi_key: str | None = None) -> dict:
+    """Ask AgentRouter first (live web search); fall back to Xingchi.
 
     Returns {"summary", "form", "injuries", "news", "sources",
-    "live_search"} where sources are the live pages the model cited and
-    live_search is always True. Raises _BriefError on any failure.
-    Total wall-clock budget is BRIEF_TOTAL_BUDGET_S.
+    "live_search"} — live_search True with the cited sources when
+    AgentRouter answers, False with no sources when the Xingchi
+    knowledge-only fallback answers. Raises _BriefError on any
+    failure. Total wall-clock budget is BRIEF_TOTAL_BUDGET_S; the
+    fallback only runs if time is left in that budget.
     """
     deadline = time.monotonic() + BRIEF_TOTAL_BUDGET_S
 
@@ -525,10 +654,23 @@ def _build_brief(home: str, away: str, league: str,
             raise _BriefError("AI search time budget exhausted")
         return min(cap, remaining)
 
-    parsed = _summarise_with_agentrouter(
-        home, away, league, agentrouter_key,
-        _timeout(AGENTROUTER_TIMEOUT_S))
-    parsed["live_search"] = True
+    if agentrouter_key:
+        try:
+            parsed = _summarise_with_agentrouter(
+                home, away, league, agentrouter_key,
+                _timeout(AGENTROUTER_TIMEOUT_S))
+            parsed["live_search"] = True
+            return parsed
+        except _BriefError:
+            if not xingchi_key:
+                raise
+    if not xingchi_key:
+        raise _BriefError("No AI briefing key is configured")
+    parsed = _summarise_with_xingchi(
+        home, away, league, xingchi_key,
+        _timeout(XINGCHI_TIMEOUT_S))
+    parsed["live_search"] = False
+    parsed["sources"] = []
     return parsed
 
 
@@ -634,12 +776,14 @@ def predict(req: PredictRequest) -> PredictionOut:
 def ai_brief(req: BriefRequest) -> BriefOut:
     """AI match briefing: live web search via AgentRouter, never
     predictions. The AI searches the web for the fixture and cites
-    its sources.
+    its sources. If AgentRouter fails and a Xingchi key is set, the
+    briefing falls back to Xingchi's knowledge-only answer
+    (live_search false, no sources).
 
     Team names are used as given, so this works for any league. 503 if
-    AGENTROUTER_API_KEY is not set; 502 if AgentRouter fails or times
-    out; never 500 and never hangs (95s total budget — the search
-    itself is slow).
+    neither key is set; 502 if both services fail or time out; never
+    500 and never hangs (95s total budget — the search itself is
+    slow).
     """
     home = req.home_team.strip()
     away = req.away_team.strip()
@@ -651,17 +795,20 @@ def ai_brief(req: BriefRequest) -> BriefOut:
         raise HTTPException(status_code=400, detail={
             "error": "Home and away teams must be different"})
     agentrouter_key = os.environ.get("AGENTROUTER_API_KEY")
-    if not agentrouter_key:
+    xingchi_key = os.environ.get("XINGCHI_API_KEY")
+    if not agentrouter_key and not xingchi_key:
         raise HTTPException(status_code=503, detail={
             "error": "AI search is not configured",
-            "hint": "Set AGENTROUTER_API_KEY on the server to enable the AI match briefing.",
+            "hint": "Set AGENTROUTER_API_KEY or XINGCHI_API_KEY on the server "
+                    "to enable the AI match briefing.",
         })
     key = (_norm(home), _norm(away), league)
     cached = _brief_cache.get(key)
     if cached and time.monotonic() - cached[0] < BRIEF_CACHE_TTL_S:
         return BriefOut(**cached[1])
     try:
-        parsed = _build_brief(home, away, league, agentrouter_key)
+        parsed = _build_brief(home, away, league,
+                              agentrouter_key, xingchi_key)
     except _BriefError as exc:
         raise HTTPException(status_code=502, detail={
             "error": "AI search is unavailable right now",

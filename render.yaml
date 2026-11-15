@@ -18,5 +18,7 @@ services:
         sync: false
       - key: AGENTROUTER_API_KEY
         sync: false
+      - key: XINGCHI_API_KEY
+        sync: false
       - key: API_KEY
         sync: false

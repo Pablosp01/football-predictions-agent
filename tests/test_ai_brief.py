@@ -1,9 +1,13 @@
-"""AI match briefing tests: POST /ai-brief with AgentRouter only.
+"""AI match briefing tests: POST /ai-brief, AgentRouter primary with a
+Xingchi fallback.
 
 Live web search: the /v1/responses call carries the web_search tool and
 sources are extracted from the answer's markdown links and from the
-web_search_call output items. No real keys and no network:
-football_agent.api.requests.post (AgentRouter) is patched.
+web_search_call output items. If AgentRouter fails and a Xingchi key is
+set, the briefing falls back to Xingchi's /v1/chat/completions
+(gpt-6.1-sol, knowledge-only: live_search false, no sources). No real
+keys and no network: football_agent.api.requests.post (both gateways)
+is patched.
 """
 import json
 import os
@@ -77,8 +81,41 @@ class _FakeResponse:
         return self._payload
 
 
+FAKE_XINGCHI_OK = {
+    "choices": [{"message": {"role": "assistant", "content": BRIEFING_JSON}}],
+}
+
+FAKE_XINGCHI_OK_NO_JSON = {
+    "choices": [{"message": {"role": "assistant",
+                             "content": "Arsenal are in good form lately."}}],
+}
+
+
+def _dispatch(mapping):
+    """requests.post side_effect dispatching on the URL called."""
+    def _call(url, **kwargs):
+        for prefix, resp in mapping.items():
+            if url.startswith(prefix):
+                if isinstance(resp, Exception):
+                    raise resp
+                return resp
+        raise AssertionError(f"unexpected URL: {url}")
+    return _call
+
+
 def _set_key(monkeypatch):
     monkeypatch.setenv("AGENTROUTER_API_KEY", "agentrouter-test-key")
+
+
+def _set_keys(monkeypatch, agentrouter=True, xingchi=True):
+    if agentrouter:
+        monkeypatch.setenv("AGENTROUTER_API_KEY", "agentrouter-test-key")
+    else:
+        monkeypatch.delenv("AGENTROUTER_API_KEY", raising=False)
+    if xingchi:
+        monkeypatch.setenv("XINGCHI_API_KEY", "xingchi-test-key")
+    else:
+        monkeypatch.delenv("XINGCHI_API_KEY", raising=False)
 
 
 def _post_brief(client):
@@ -209,20 +246,130 @@ def test_ai_brief_plain_text_falls_back_to_summary(monkeypatch):
     assert body["sources"] == []
 
 
-def test_ai_brief_missing_key_503(monkeypatch):
-    monkeypatch.delenv("AGENTROUTER_API_KEY", raising=False)
+def test_ai_brief_agentrouter_failure_falls_back_to_xingchi(monkeypatch):
+    """AgentRouter 500 + Xingchi success => knowledge-only briefing."""
+    _set_keys(monkeypatch)
+    with _client() as client, patch(
+            "football_agent.api.requests.post",
+            side_effect=_dispatch({
+                api.AGENTROUTER_RESPONSES_URL: _FakeResponse(
+                    500, {"error": {"message": "gateway error"}}),
+                api.XINGCHI_CHAT_URL: _FakeResponse(200, FAKE_XINGCHI_OK),
+            })) as mock_post:
+        r = _post_brief(client)
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["home_team"] == "Arsenal"
+    assert "good form" in body["summary"]
+    assert body["form"] == ["Arsenal: W W D W W", "Chelsea: W D W W L"]
+    # The fallback is honest: no live search, no live sources.
+    assert body["live_search"] is False
+    assert body["sources"] == []
+    assert "xingchi-test-key" not in r.text
+    assert "agentrouter-test-key" not in r.text
+    # Two calls: AgentRouter first, then Xingchi.
+    assert mock_post.call_count == 2
+    ar_args, ar_kwargs = mock_post.call_args_list[0]
+    assert ar_args[0] == api.AGENTROUTER_RESPONSES_URL
+    assert ar_kwargs["json"]["tools"] == [{"type": "web_search"}]
+    xc_args, xc_kwargs = mock_post.call_args_list[1]
+    assert xc_args[0] == api.XINGCHI_CHAT_URL
+    assert xc_kwargs["headers"]["Authorization"] == "Bearer xingchi-test-key"
+    assert xc_kwargs["headers"]["User-Agent"] == (
+        "claude-cli/2.1.220 (external, claude-desktop)")
+    assert xc_kwargs["headers"]["anthropic-version"] == "2023-06-01"
+    assert xc_kwargs["timeout"] == 30
+    sent = xc_kwargs["json"]
+    assert sent["model"] == "gpt-6.1-sol"
+    assert "tools" not in sent
+    content = sent["messages"][0]["content"]
+    assert sent["messages"][0]["role"] == "user"
+    assert "no web access" in content
+    assert "Arsenal" in content and "Chelsea" in content
+    # A repeat request for the same pair is served from cache.
+    r2 = _post_brief(client)
+    assert r2.status_code == 200
+    assert mock_post.call_count == 2
+
+
+def test_ai_brief_both_fail_502(monkeypatch):
+    _set_keys(monkeypatch)
+    with _client() as client, patch(
+            "football_agent.api.requests.post",
+            side_effect=_dispatch({
+                api.AGENTROUTER_RESPONSES_URL: _FakeResponse(
+                    500, {"error": {"message": "gateway error"}}),
+                api.XINGCHI_CHAT_URL: _FakeResponse(
+                    503, {"error": {"message": "Service temporarily unavailable"}}),
+            })):
+        r = _post_brief(client)
+    assert r.status_code == 502, r.text
+    assert "unavailable" in r.json()["detail"]["error"]
+
+
+def test_ai_brief_xingchi_403_falls_through_to_502(monkeypatch):
+    """A Xingchi 403 (no fingerprint / bad key) is a 502, not a 503."""
+    _set_keys(monkeypatch)
+    with _client() as client, patch(
+            "football_agent.api.requests.post",
+            side_effect=_dispatch({
+                api.AGENTROUTER_RESPONSES_URL: _FakeResponse(
+                    500, {"error": {"message": "gateway error"}}),
+                api.XINGCHI_CHAT_URL: _FakeResponse(
+                    403, {"error": {"code": "client_not_allowed",
+                                    "message": "forbidden"}}),
+            })):
+        r = _post_brief(client)
+    assert r.status_code == 502, r.text
+
+
+def test_ai_brief_xingchi_only_key_uses_fallback(monkeypatch):
+    """Only a Xingchi key set: the fallback answers directly."""
+    _set_keys(monkeypatch, agentrouter=False, xingchi=True)
+    with _client() as client, patch(
+            "football_agent.api.requests.post",
+            side_effect=_dispatch({
+                api.XINGCHI_CHAT_URL: _FakeResponse(200, FAKE_XINGCHI_OK),
+            })) as mock_post:
+        r = _post_brief(client)
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["live_search"] is False
+    assert body["sources"] == []
+    assert "good form" in body["summary"]
+    assert mock_post.call_count == 1
+    assert mock_post.call_args[0][0] == api.XINGCHI_CHAT_URL
+
+
+def test_ai_brief_no_keys_503(monkeypatch):
+    _set_keys(monkeypatch, agentrouter=False, xingchi=False)
     with _client() as client, patch(
             "football_agent.api.requests.post") as mock_post:
         r = _post_brief(client)
     assert r.status_code == 503, r.text
     assert "not configured" in r.json()["detail"]["error"]
     assert "AGENTROUTER_API_KEY" in r.json()["detail"]["hint"]
+    assert "XINGCHI_API_KEY" in r.json()["detail"]["hint"]
     mock_post.assert_not_called()
+
+
+def test_ai_brief_agentrouter_fails_no_xingchi_key_502(monkeypatch):
+    """AgentRouter fails and no Xingchi key: 502, as before."""
+    _set_keys(monkeypatch, agentrouter=True, xingchi=False)
+    with _client() as client, patch(
+            "football_agent.api.requests.post",
+            return_value=_FakeResponse(
+                500, {"error": {"message": "gateway error"}})) as mock_post:
+        r = _post_brief(client)
+    assert r.status_code == 502, r.text
+    assert mock_post.call_count == 1
+    assert mock_post.call_args[0][0] == api.AGENTROUTER_RESPONSES_URL
 
 
 @pytest.mark.parametrize("status", [401, 429, 500])
 def test_ai_brief_http_error_502(monkeypatch, status):
     _set_key(monkeypatch)
+    monkeypatch.delenv("XINGCHI_API_KEY", raising=False)
     with _client() as client, patch(
             "football_agent.api.requests.post",
             return_value=_FakeResponse(
@@ -268,10 +415,11 @@ def test_root_page_has_briefing_section():
     assert "/ai-brief" in html
     assert "AI match briefing" in html
     assert "ai-brief" in html.lower()
-    # The page says the briefing is a live web search.
+    # The page says the briefing is a live web search when AgentRouter
+    # answers, and says it is knowledge-only when the fallback does.
     assert "live web search" in html.lower()
     assert "Searched the web" in html
-    assert "not a live web search" not in html
-    assert "own knowledge" not in html
+    assert "From the AI’s own knowledge, not a live web search" in html
+    assert "own knowledge" in html
     assert "safe bet" not in html.lower()
     assert "guaranteed win" not in html.lower()

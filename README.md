@@ -85,7 +85,7 @@ button. On Render's free plan the first request after idle can take
 50–90s while the service wakes; once warm, predictions take a few
 seconds.
 
-### AI match briefing (optional, one free key)
+### AI match briefing (optional, free keys)
 
 After each prediction the page also fetches `POST /ai-brief`, which
 asks an AI model for match context — recent form, injuries/suspensions
@@ -99,23 +99,38 @@ take up to about a minute — so the endpoint allows 95s and the page
 shows a loading state for that long; briefings are cached in memory
 for 15 minutes per team pair, so repeat requests are instant.
 
-To enable it, create one free key and set it as an environment
-variable on the server (Render dashboard → Environment, or
-`AGENTROUTER_API_KEY=... uvicorn football_agent.api:app` locally):
+If the AgentRouter call fails and a Xingchi key is set, the briefing
+falls back to Xingchi's `gpt-6.1-sol` chat model, which has no web
+search: the answer comes from the model's own knowledge, the response
+carries `live_search: false` with no sources, and the page says so
+("From the AI's own knowledge, not a live web search"). AgentRouter
+stays the primary summariser; Xingchi is only a fallback.
 
-- AgentRouter key — free credits, no card: register at
+To enable it, set one or both keys as environment variables on the
+server (Render dashboard → Environment, or
+`AGENTROUTER_API_KEY=... XINGCHI_API_KEY=... uvicorn football_agent.api:app`
+locally):
+
+- AgentRouter key (primary) — free credits, no card: register at
   https://agentrouter.org and copy the key from
   https://agentrouter.org/console/token. It calls
   `POST https://agentrouter.org/v1/responses` (its models do not
   support `/v1/chat/completions`) and sends the Claude Code client
   fingerprint headers the gateway requires.
+- Xingchi key (fallback only) — pay as you go: get a key from
+  https://api.xingchiapi.com. It calls
+  `POST https://api.xingchiapi.com/v1/chat/completions` with model
+  `gpt-6.1-sol` (the other listed model, `gpt-6-astra`, was
+  unavailable in testing) and the same fingerprint headers; it
+  cannot search the web.
 
-Until the key is set, `/ai-brief` answers 503 (naming the missing
-key) and the page hides the section silently. The
+Until either key is set, `/ai-brief` answers 503 (naming both keys)
+and the page hides the section silently. The
 model is `gpt-5.6-sol` by default (override with the
-`AGENTROUTER_MODEL` environment variable). If AgentRouter errors or
-times out (95s total budget), the endpoint answers 502 and the page
-says so without touching the prediction.
+`AGENTROUTER_MODEL` environment variable; `XINGCHI_MODEL` overrides
+the fallback model). If AgentRouter errors or times out (95s total
+budget) and the Xingchi fallback also fails, the endpoint answers
+502 and the page says so without touching the prediction.
 
 ## How accuracy is measured
 

@@ -139,6 +139,28 @@
   }
   function pct(v) { return (v * 100).toFixed(1) + "%"; }
 
+  // Largest-remainder rounding to one decimal for the 1X2 row: the
+  // three displayed percentages always sum to exactly 100.0%.
+  // Rounding each probability on its own can add up to 100.1%
+  // (47.6 + 27.4 + 25.1), while the raw API values sum to 1.0 at full
+  // precision. Tenths are floored first, then the leftover tenths go
+  // to the largest remainders (ties: home, draw, away). Returns the
+  // three values as tenths of a percent, summing to 1000.
+  function tenths1x2(ph, pd, pa) {
+    var vals = [ph, pd, pa];
+    var floors = vals.map(function (v) {
+      return Math.floor(v * 1000 + 1e-9);
+    });
+    var fracs = vals.map(function (v, i) { return v * 1000 - floors[i]; });
+    var need = 1000 - (floors[0] + floors[1] + floors[2]);
+    var order = [0, 1, 2].sort(function (a, b) {
+      return fracs[b] - fracs[a] || a - b;
+    });
+    for (var k = 0; k < need; k++) floors[order[k % 3]] += 1;
+    return floors;
+  }
+  function pctTenths(t) { return (t / 10).toFixed(1) + "%"; }
+
   function addMsg(cls, html) {
     var div = document.createElement("div");
     div.className = "msg " + cls;
@@ -163,12 +185,13 @@
   function renderPrediction(d) {
     var pickName = d.most_likely === "H" ? d.home_team
       : d.most_likely === "A" ? d.away_team : "Draw";
+    var t12 = tenths1x2(d.p_home, d.p_draw, d.p_away);
     var rows = [
-      ["Home win", d.p_home], ["Draw", d.p_draw], ["Away win", d.p_away]
+      ["Home win", t12[0]], ["Draw", t12[1]], ["Away win", t12[2]]
     ].map(function (r) {
       return '<div class="bar-row"><span>' + esc(r[0]) + '</span>' +
-        '<div class="bar"><div style="width:' + (r[1] * 100).toFixed(1) + '%"></div></div>' +
-        '<span>' + pct(r[1]) + '</span></div>';
+        '<div class="bar"><div style="width:' + (r[1] / 10).toFixed(1) + '%"></div></div>' +
+        '<span>' + pctTenths(r[1]) + '</span></div>';
     }).join("");
     var scores = d.top_scorelines.map(function (s) {
       return "<li><span>" + esc(s.score) + "</span><span>" + pct(s.prob) + "</span></li>";
@@ -277,13 +300,22 @@
   }
 
   function renderBrief(d) {
-    // AI match briefing: a live web search — the AI searched the web
-    // for this match and cites its sources below. The numbers above
-    // are the model's.
-    var html = "<h3>🔍 AI match briefing</h3>" +
-      '<div class="sub">Live web search — the AI searched the web for ' +
-      "this match. The percentages and scorelines above are " +
-      "the model’s, not the AI’s.</div>";
+    // AI match briefing. When live_search is true the AI searched the
+    // web for this match and cites its sources below; when false the
+    // Xingchi fallback answered from its own knowledge, there are no
+    // live sources, and the note says so. The numbers above are the
+    // model's either way.
+    var live = d.live_search !== false;
+    var html = "<h3>🔍 AI match briefing</h3>";
+    if (live) {
+      html += '<div class="sub">Live web search — the AI searched the web for ' +
+        "this match. The percentages and scorelines above are " +
+        "the model’s, not the AI’s.</div>";
+    } else {
+      html += '<div class="sub">From the AI’s own knowledge, not a live web search — ' +
+        "it may be out of date. The percentages and scorelines above are " +
+        "the model’s, not the AI’s.</div>";
+    }
     if (d.summary) html += "<p>" + esc(d.summary) + "</p>";
     function section(title, items) {
       if (!items || !items.length) return "";
@@ -294,7 +326,7 @@
     html += section("Recent form", d.form);
     html += section("Injuries & suspensions", d.injuries);
     html += section("Team news", d.news);
-    if (d.sources && d.sources.length) {
+    if (live && d.sources && d.sources.length) {
       html += "<b>Sources</b><ul class=\"sources\">" + d.sources.map(function (s) {
         var url = String(s.url || "");
         if (url.indexOf("http://") !== 0 && url.indexOf("https://") !== 0) return "";
@@ -303,8 +335,11 @@
       }).join("") + "</ul>";
     }
     if (d.searched_at) {
-      html += '<div class="disclaimer">Searched the web, as of ' + esc(d.searched_at) +
-        ".</div>";
+      html += '<div class="disclaimer">' +
+        (live ? "Searched the web, as of " : "From the AI’s knowledge, as of ") +
+        esc(d.searched_at) +
+        (live ? "." : " — not a live web search, so it may be out of date.") +
+        "</div>";
     }
     return html;
   }
