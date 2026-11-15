@@ -70,10 +70,12 @@ FAKE_AGENTROUTER_OUTPUT_SHAPE = {
 class _FakeResponse:
     """Minimal stand-in for requests.Response."""
 
-    def __init__(self, status_code=200, payload=None, text=""):
+    def __init__(self, status_code=200, payload=None, text=None):
         self.status_code = status_code
         self._payload = payload
-        self.text = text or json.dumps(payload or {})
+        # Explicit text wins (so a truly empty body can be faked);
+        # otherwise the body is the JSON of the payload.
+        self.text = text if text is not None else json.dumps(payload or {})
 
     def json(self):
         if self._payload is None:
@@ -493,6 +495,35 @@ def test_ai_brief_empty_answer_502(monkeypatch):
             return_value=_FakeResponse(200, {"output_text": ""})):
         r = _post_brief(client)
     assert r.status_code == 502, r.text
+
+
+def test_ai_brief_empty_body_502(monkeypatch):
+    """AgentRouter 200 with an empty body: 502 naming the empty response."""
+    _set_keys(monkeypatch, agentrouter=True, xingchi=False)
+    with _client() as client, patch(
+            "football_agent.api.requests.post",
+            return_value=_FakeResponse(200, None, text="")):
+        r = _post_brief(client)
+    assert r.status_code == 502, r.text
+    assert "empty response" in r.json()["detail"]["hint"]
+
+
+def test_ai_brief_non_json_body_502(monkeypatch):
+    """AgentRouter 200 with an HTML body: 502, unreadable response."""
+    _set_keys(monkeypatch, agentrouter=True, xingchi=False)
+    with _client() as client, patch(
+            "football_agent.api.requests.post",
+            return_value=_FakeResponse(200, None,
+                                       text="<html>error page</html>")):
+        r = _post_brief(client)
+    assert r.status_code == 502, r.text
+    assert "unreadable response" in r.json()["detail"]["hint"]
+
+
+def test_brief_prompt_no_upcoming_fixture_fallback():
+    prompt = api._brief_prompt("Arsenal", "Chelsea", "PL", "2026-11-16")
+    assert "no upcoming fixture" in prompt
+    assert "latest news for each team" in prompt
 
 
 def test_ai_brief_same_team_400(monkeypatch):

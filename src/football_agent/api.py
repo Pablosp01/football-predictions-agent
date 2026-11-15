@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import difflib
 import json
+import logging
 import os
 import re
 import time
@@ -32,6 +33,10 @@ from .data.providers import INTERNATIONAL_LEAGUES, get_provider
 from .model.predict import Predictor
 
 MODEL_NAME = "Elo + Dixon-Coles Poisson"
+# Server log for AI-gateway diagnostics. Only gateway response shapes
+# are logged (status, content type, body length and a short head) —
+# never an API key, and never a full body.
+logger = logging.getLogger("football_agent.api")
 # Every football-data.org free-tier (TIER_ONE) competition.
 LEAGUES = ["PL", "PD", "SA", "BL1", "FL1", "ELC", "DED", "PPL", "BSA",
            "CL", "WC", "EC"]
@@ -417,6 +422,8 @@ def _brief_prompt(home: str, away: str, league: str, today: str) -> str:
         "Rules:\n"
         "- Use ONLY what you find in the web search result. If a section "
         "has no reliable information, use an empty list.\n"
+        "- If there is no upcoming fixture between these teams, use the "
+        "latest news for each team instead of leaving everything empty.\n"
         "- Cite every factual claim with a source link in the text, like "
         "[ESPN](https://www.espn.com/soccer/...).\n"
         "- Do NOT invent players, results, or injuries.\n"
@@ -568,6 +575,11 @@ def _summarise_with_agentrouter(home: str, away: str, league: str,
         raise _BriefError(f"AgentRouter request failed: {exc}") from exc
     if resp.status_code != 200:
         detail = _http_error_detail(resp)
+        logger.warning(
+            "AgentRouter HTTP %s: content-type=%s body-head=%r",
+            resp.status_code,
+            (getattr(resp, "headers", None) or {}).get("Content-Type", ""),
+            (resp.text or "")[:200])
         raise _BriefError(
             f"AgentRouter returned HTTP {resp.status_code}"
             + (f": {detail}" if detail else "")
@@ -575,10 +587,25 @@ def _summarise_with_agentrouter(home: str, away: str, league: str,
     try:
         data = resp.json()
     except ValueError as exc:
+        body_text = resp.text or ""
+        logger.warning(
+            "AgentRouter unreadable response: status=%s content-type=%s "
+            "len=%s body-head=%r",
+            resp.status_code,
+            (getattr(resp, "headers", None) or {}).get("Content-Type", ""),
+            len(body_text), body_text[:300])
+        if not body_text.strip():
+            raise _BriefError(
+                "AgentRouter returned an empty response") from exc
         raise _BriefError(
             "AgentRouter returned an unreadable response") from exc
     text = _extract_agentrouter_text(data)
     if not text:
+        logger.warning(
+            "AgentRouter no answer text: top-level keys=%s output items=%s",
+            sorted(data.keys()) if isinstance(data, dict) else type(data),
+            [it.get("type") for it in (data.get("output") or [])
+             if isinstance(it, dict)] if isinstance(data, dict) else "?")
         raise _BriefError("AgentRouter returned no answer text")
     parsed = _parse_briefing(text)
     parsed["sources"] = _extract_sources(text, data)
@@ -633,6 +660,11 @@ def _summarise_with_xingchi(home: str, away: str, league: str,
         raise _BriefError(f"Xingchi request failed: {exc}") from exc
     if resp.status_code != 200:
         detail = _http_error_detail(resp)
+        logger.warning(
+            "Xingchi HTTP %s: content-type=%s body-head=%r",
+            resp.status_code,
+            (getattr(resp, "headers", None) or {}).get("Content-Type", ""),
+            (resp.text or "")[:200])
         raise _BriefError(
             f"Xingchi returned HTTP {resp.status_code}"
             + (f": {detail}" if detail else "")
@@ -640,6 +672,15 @@ def _summarise_with_xingchi(home: str, away: str, league: str,
     try:
         data = resp.json()
     except ValueError as exc:
+        body_text = resp.text or ""
+        logger.warning(
+            "Xingchi unreadable response: status=%s content-type=%s "
+            "len=%s body-head=%r",
+            resp.status_code,
+            (getattr(resp, "headers", None) or {}).get("Content-Type", ""),
+            len(body_text), body_text[:300])
+        if not body_text.strip():
+            raise _BriefError("Xingchi returned an empty response") from exc
         raise _BriefError(
             "Xingchi returned an unreadable response") from exc
     text = _extract_xingchi_text(data)
