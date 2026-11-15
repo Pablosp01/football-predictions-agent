@@ -8,7 +8,7 @@ import numpy as np
 
 from ..data.types import Match
 from .calibration import Calibrator
-from .elo import EloRatings
+from .elo import HOME_ADVANTAGE, EloRatings
 from .features import form_points, goals_per_game, head_to_head, rest_days
 from .poisson import DixonColesModel
 
@@ -105,10 +105,16 @@ class Prediction:
 
 
 class Predictor:
-    """Fits Elo + Dixon-Coles on history, then predicts fixtures."""
+    """Fits Elo + Dixon-Coles on history, then predicts fixtures.
 
-    def __init__(self) -> None:
-        self.elo = EloRatings()
+    home_advantage is the Elo home edge in points (default +60, the
+    club-game edge). International tournaments are played mostly at
+    neutral venues and the listed "home" team is nominal, so the
+    international pool is fitted with home_advantage=0.
+    """
+
+    def __init__(self, home_advantage: float = HOME_ADVANTAGE) -> None:
+        self.elo = EloRatings(home_advantage=home_advantage)
         self.dc = DixonColesModel()
         self.calibrator = Calibrator()
         self.history: list[Match] = []

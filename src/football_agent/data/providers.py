@@ -18,10 +18,34 @@ import requests
 from .types import Match
 
 LEAGUE_CODES = {"PL": "PL", "La Liga": "PD", "Serie A": "SA",
-                "Bundesliga": "BL1", "Ligue 1": "FL1", "UCL": "CL"}
+                "Bundesliga": "BL1", "Ligue 1": "FL1", "Championship": "ELC",
+                "Eredivisie": "DED", "Primeira Liga": "PPL",
+                "Campeonato Brasileiro Série A": "BSA", "UCL": "CL",
+                "European Championship": "EC", "FIFA World Cup": "WC"}
 CODE_TO_LEAGUE = {v: k for k, v in LEAGUE_CODES.items()}
 
+# football-data.org free tier (TIER_ONE) covers exactly these 12
+# competitions: the top 5 leagues + Championship, Eredivisie, Primeira
+# Liga, Brasileirão Série A, Champions League, and the two international
+# tournaments below. Verified 2026-11-15 against the official docs
+# (WC/EC/BSA are TIER_ONE) and the free-plan lists published by
+# freeapihub (2026-11-08) and thestatsapi/highlightly (2026).
+FREE_TIER_COMPETITIONS = {
+    "PL": "Premier League", "PD": "La Liga", "SA": "Serie A",
+    "BL1": "Bundesliga", "FL1": "Ligue 1", "ELC": "Championship",
+    "DED": "Eredivisie", "PPL": "Primeira Liga",
+    "BSA": "Campeonato Brasileiro Série A", "CL": "Champions League",
+    "EC": "European Championship", "WC": "FIFA World Cup",
+}
+
+# International tournaments: national teams only. They share one rating
+# pool (the bundled international sample) and are never mixed with
+# club-team Elo.
+INTERNATIONAL_LEAGUES = {"WC", "EC"}
+
 DEFAULT_SAMPLE = Path(__file__).resolve().parents[3] / "data" / "sample" / "pl_matches.csv"
+DEFAULT_INTERNATIONAL_SAMPLE = (Path(__file__).resolve().parents[3]
+                                / "data" / "sample" / "international_matches.csv")
 CACHE_DIR = Path(__file__).resolve().parents[3] / "data" / "cache"
 
 
@@ -85,6 +109,33 @@ class SampleProvider(CsvProvider):
         super().__init__(path or DEFAULT_SAMPLE)
 
 
+class InternationalSampleProvider(CsvProvider):
+    """Bundled senior men's international results (offline fallback).
+
+    One shared rating pool for the World Cup (WC) and the Euros (EC):
+    national teams are never mixed with club teams. The file IS the
+    pool, so matches() returns every played match in it regardless of
+    the requested league code. Source: martj42/international_results
+    (results.csv, public domain), filtered to competitive senior men's
+    internationals — finals of the World Cup, Euros, Copa América,
+    AFCON, Gold Cup and Asian Cup from 2024 onward, plus the most
+    recent qualifiers / Nations League matches — 480 matches,
+    2024-01-12 to 2026-10-06, 168 national teams.
+    """
+
+    def __init__(self, path: str | Path | None = None):
+        super().__init__(path or DEFAULT_INTERNATIONAL_SAMPLE)
+
+    def matches(self, league: str = "WC") -> list[Match]:
+        with open(self.path, newline="", encoding="utf-8") as fh:
+            rows = [_row_to_match(r) for r in csv.DictReader(fh)]
+        return sorted([m for m in rows if m.played], key=lambda m: m.date)
+
+    def fixtures(self, league: str = "WC", on: date | None = None) -> list[Match]:
+        # The bundled sample holds results only; no future fixtures.
+        return []
+
+
 class FootballDataOrgProvider:
     """football-data.org v4, free tier (10 req/min). Key via env var.
 
@@ -146,10 +197,16 @@ class FootballDataOrgProvider:
 
 
 def get_provider(league: str = "PL") -> Provider:
-    """Prefer the live API when a key is set, else the bundled sample data."""
+    """Prefer the live API when a key is set, else the bundled sample data.
+
+    WC/EC use the international sample pool (national teams only);
+    club leagues use the Premier League sample file.
+    """
     if os.environ.get("FOOTBALL_DATA_API_KEY"):
         try:
             return FootballDataOrgProvider()
         except ValueError:
             pass
+    if league in INTERNATIONAL_LEAGUES:
+        return InternationalSampleProvider()
     return SampleProvider()

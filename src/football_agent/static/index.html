@@ -87,6 +87,7 @@
     <button type="button" class="chip" data-home="Arsenal" data-away="Chelsea">Arsenal vs Chelsea</button>
     <button type="button" class="chip" data-home="Man Utd" data-away="Liverpool">Man Utd vs Liverpool</button>
     <button type="button" class="chip" data-home="Liverpool" data-away="Man City">Liverpool vs Man City</button>
+    <button type="button" class="chip" data-home="Argentina" data-away="Brazil" data-league="WC">Argentina vs Brazil (World Cup)</button>
   </div>
 
   <form id="predict-form">
@@ -95,18 +96,28 @@
     <button id="predict-button" type="submit">Predict</button>
     <div class="row2">
       <select id="league-select" aria-label="League">
-        <option value="PL" selected>Premier League (PL)</option>
-        <option value="PD">La Liga (PD)</option>
-        <option value="SA">Serie A (SA)</option>
-        <option value="BL1">Bundesliga (BL1)</option>
-        <option value="FL1">Ligue 1 (FL1)</option>
-        <option value="CL">Champions League (CL)</option>
+        <optgroup label="Club leagues">
+          <option value="PL" selected>Premier League (PL)</option>
+          <option value="PD">La Liga (PD)</option>
+          <option value="SA">Serie A (SA)</option>
+          <option value="BL1">Bundesliga (BL1)</option>
+          <option value="FL1">Ligue 1 (FL1)</option>
+          <option value="ELC">Championship (ELC)</option>
+          <option value="DED">Eredivisie (DED)</option>
+          <option value="PPL">Primeira Liga (PPL)</option>
+          <option value="BSA">Brasileirão Série A (BSA)</option>
+          <option value="CL">Champions League (CL)</option>
+        </optgroup>
+        <optgroup label="International tournaments">
+          <option value="WC">FIFA World Cup (WC)</option>
+          <option value="EC">European Championship (EC)</option>
+        </optgroup>
       </select>
       <button type="button" class="secondary" id="clear-button">Clear chat</button>
     </div>
-    <p class="note">Only the Premier League works without a data key — other leagues need
-      FOOTBALL_DATA_API_KEY set on the server. The free host sleeps when idle, so the
-      first prediction can take up to a minute while it wakes up.</p>
+    <p class="note">Premier League, World Cup and Euros work without a data key — other
+      leagues need FOOTBALL_DATA_API_KEY set on the server. The free host sleeps
+      when idle, so the first prediction can take up to a minute while it wakes up.</p>
   </form>
 </div>
 
@@ -367,6 +378,8 @@
     if (!chip || predictButton.disabled) return;
     homeInput.value = chip.getAttribute("data-home");
     awayInput.value = chip.getAttribute("data-away");
+    var chipLeague = chip.getAttribute("data-league");
+    if (chipLeague) leagueSelect.value = chipLeague;
     doPredict(homeInput.value, awayInput.value, leagueSelect.value);
   });
 

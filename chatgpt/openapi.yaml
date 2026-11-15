@@ -32,7 +32,7 @@ paths:
                 properties:
                   status: { type: string, example: ok }
                   model: { type: string, example: "Elo + Dixon-Coles Poisson" }
-                  leagues: { type: array, items: { type: string }, example: ["PL", "PD", "SA", "BL1", "FL1", "CL"] }
+                  leagues: { type: array, items: { type: string }, example: ["PL", "PD", "SA", "BL1", "FL1", "ELC", "DED", "PPL", "BSA", "CL", "WC", "EC"] }
   /predict:
     post:
       operationId: predictMatch
@@ -57,7 +57,7 @@ paths:
               properties:
                 home_team: { type: string, example: Arsenal }
                 away_team: { type: string, example: Chelsea }
-                league: { type: string, default: PL, example: PL, description: "PL, PD (La Liga), SA (Serie A), BL1 (Bundesliga), FL1 (Ligue 1), CL (Champions League). Sample data only covers PL without a live data key." }
+                league: { type: string, default: PL, example: PL, description: "PL, PD (La Liga), SA (Serie A), BL1 (Bundesliga), FL1 (Ligue 1), ELC (Championship), DED (Eredivisie), PPL (Primeira Liga), BSA (Brasileirão Série A), CL (Champions League), WC (FIFA World Cup), EC (European Championship). Without a live data key, only PL, WC and EC work — the rest need FOOTBALL_DATA_API_KEY on the server." }
       responses:
         "200":
           description: Model prediction

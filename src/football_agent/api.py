@@ -28,11 +28,13 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
 from .backtest import walk_forward
-from .data.providers import get_provider
+from .data.providers import INTERNATIONAL_LEAGUES, get_provider
 from .model.predict import Predictor
 
 MODEL_NAME = "Elo + Dixon-Coles Poisson"
-LEAGUES = ["PL", "PD", "SA", "BL1", "FL1", "CL"]
+# Every football-data.org free-tier (TIER_ONE) competition.
+LEAGUES = ["PL", "PD", "SA", "BL1", "FL1", "ELC", "DED", "PPL", "BSA",
+           "CL", "WC", "EC"]
 DISCLAIMER = (
     "Statistical model output, not betting advice. No guarantee of profit; "
     "probabilities are estimates and football is noisy."
@@ -78,7 +80,27 @@ ALIASES = {
     "west ham": "West Ham", "west ham united": "West Ham",
     "wolves": "Wolves", "wolverhampton": "Wolves",
     "wolverhampton wanderers": "Wolves",
+    # International teams (names as in the bundled international sample).
+    "usa": "United States", "us": "United States", "america": "United States",
+    "united states of america": "United States",
+    "cote d'ivoire": "Ivory Coast", "c te d'ivoire": "Ivory Coast",
+    "czechia": "Czech Republic", "ir iran": "Iran",
+    "korea republic": "South Korea", "turkiye": "Turkey",
+    "holland": "Netherlands",
 }
+
+
+def _require_known_league(league: str) -> str:
+    """Normalise a league code, or raise a clear 400 for unknown ones."""
+    code = (league or "PL").strip().upper()
+    if code not in LEAGUES:
+        raise HTTPException(status_code=400, detail={
+            "error": f"Unknown league: '{league}'",
+            "known_leagues": LEAGUES,
+            "hint": ("Supported competitions are the football-data.org free tier: "
+                     "PL, PD, SA, BL1, FL1, ELC, DED, PPL, BSA, CL, WC, EC."),
+        })
+    return code
 
 
 def _known_teams(league: str) -> list[str]:
@@ -125,6 +147,7 @@ _matches_cache: dict[str, list] = {}
 
 
 def get_predictor(league: str) -> Predictor:
+    league = _require_known_league(league)
     if league not in _predictors:
         provider = get_provider(league)
         matches = provider.matches(league)
@@ -133,10 +156,16 @@ def get_predictor(league: str) -> Predictor:
                 "error": f"Not enough historical matches to fit the model for league '{league}'",
                 "matches_available": len(matches),
                 "hint": ("Set FOOTBALL_DATA_API_KEY for live data; the bundled sample "
-                         "data only covers the Premier League (PL)."),
+                         "data only covers the Premier League (PL) and the "
+                         "international tournaments (WC, EC)."),
             })
         _matches_cache[league] = matches
-        _predictors[league] = Predictor().fit(matches)
+        if league in INTERNATIONAL_LEAGUES:
+            # National teams only, and mostly neutral venues: no Elo
+            # home edge, and a rating pool that never mixes with clubs.
+            _predictors[league] = Predictor(home_advantage=0.0).fit(matches)
+        else:
+            _predictors[league] = Predictor().fit(matches)
     return _predictors[league]
 
 
@@ -219,6 +248,7 @@ def _prediction_out(pred, league: str) -> PredictionOut:
 
 
 def _predict_one(home: str, away: str, league: str) -> PredictionOut:
+    league = _require_known_league(league)
     predictor = get_predictor(league)
     home_c = resolve_team(home, league)
     away_c = resolve_team(away, league)
@@ -293,7 +323,10 @@ class _BriefError(Exception):
 
 _LEAGUE_NAMES = {
     "PL": "Premier League", "PD": "La Liga", "SA": "Serie A",
-    "BL1": "Bundesliga", "FL1": "Ligue 1", "CL": "Champions League",
+    "BL1": "Bundesliga", "FL1": "Ligue 1", "ELC": "Championship",
+    "DED": "Eredivisie", "PPL": "Primeira Liga",
+    "BSA": "Campeonato Brasileiro Série A", "CL": "Champions League",
+    "WC": "FIFA World Cup", "EC": "European Championship",
 }
 
 
@@ -543,6 +576,10 @@ async def lifespan(app: FastAPI):
         get_predictor("PL")
     except Exception:
         pass
+    try:
+        get_predictor("WC")
+    except Exception:
+        pass
     yield
 
 
@@ -648,6 +685,7 @@ def ai_brief(req: BriefRequest) -> BriefOut:
 
 @app.post("/predict-batch", dependencies=[Depends(require_api_key)])
 def predict_batch(req: BatchRequest) -> dict:
+    req.league = _require_known_league(req.league)
     results = [_predict_one(f.home_team, f.away_team, req.league)
                for f in req.fixtures]
     results.sort(key=lambda r: r.confidence, reverse=True)
@@ -660,6 +698,7 @@ def predict_batch(req: BatchRequest) -> dict:
 @app.get("/fixtures", dependencies=[Depends(require_api_key)])
 def fixtures(league: str = "PL",
              date: str | None = Query(default=None, examples=["2026-11-15"])) -> dict:
+    league = _require_known_league(league)
     on = None
     if date:
         try:
@@ -688,9 +727,14 @@ def fixtures(league: str = "PL",
         else:
             matches = _matches_cache.get(league) or provider.matches(league)
             last = max((m.date for m in matches), default=None)
-            message = (f"No fixtures on {date or 'that date'}. The bundled sample data "
-                       f"has no future fixtures (it ends {last}); set "
-                       "FOOTBALL_DATA_API_KEY for real upcoming fixtures.")
+            if last is None:
+                message = (f"No fixtures on {date or 'that date'}. The bundled sample "
+                           f"data has no matches for {league}; set "
+                           "FOOTBALL_DATA_API_KEY for real upcoming fixtures.")
+            else:
+                message = (f"No fixtures on {date or 'that date'}. The bundled sample data "
+                           f"has no future fixtures (it ends {last}); set "
+                           "FOOTBALL_DATA_API_KEY for real upcoming fixtures.")
         return {"league": league, "date": date, "fixtures": [],
                 "message": message, "source": "model"}
     return {"league": league, "date": date, "fixtures": out, "source": "model"}
@@ -698,6 +742,7 @@ def fixtures(league: str = "PL",
 
 @app.get("/backtest", dependencies=[Depends(require_api_key)])
 def backtest(league: str = "PL") -> dict:
+    league = _require_known_league(league)
     provider = get_provider(league)
     matches = provider.matches(league)
     try:

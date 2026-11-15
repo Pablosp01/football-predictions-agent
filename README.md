@@ -136,21 +136,68 @@ on the bundled sample data.
 ## Data
 
 - **Primary:** [football-data.org](https://www.football-data.org/) v4, free tier
-  (10 requests/minute, competitions PL, PD, SA, BL1, FL1, CL).
+  (10 requests/minute). The free tier (TIER_ONE) covers exactly 12
+  competitions — every competition the app supports:
+
+  | Code | Competition | Works without a key? |
+  |------|-------------|----------------------|
+  | PL | Premier League | Yes (bundled sample) |
+  | PD | La Liga | No — needs the key |
+  | SA | Serie A | No — needs the key |
+  | BL1 | Bundesliga | No — needs the key |
+  | FL1 | Ligue 1 | No — needs the key |
+  | ELC | Championship | No — needs the key |
+  | DED | Eredivisie | No — needs the key |
+  | PPL | Primeira Liga | No — needs the key |
+  | BSA | Campeonato Brasileiro Série A | No — needs the key |
+  | CL | Champions League | No — needs the key |
+  | WC | FIFA World Cup | Yes (bundled international sample) |
+  | EC | European Championship | Yes (bundled international sample) |
+
   Get a free key at https://www.football-data.org/client/register, then:
   ```bash
   cp .env.example .env   # then set FOOTBALL_DATA_API_KEY
   export FOOTBALL_DATA_API_KEY=your_key_here
   football-predict fetch --league PL
   ```
-  API responses are cached for 6h in `data/cache/`.
-- **Fallback (offline):** bundled sample dataset
-  `data/sample/pl_matches.csv` — 480 realistic Premier League matches
-  (2024-25 full season, 380 + 2025-26 first 10 rounds, 100), generated with a
-  seeded round-robin schedule and team strengths so home-win rate (~47%),
-  goals (~1.59 home / 1.27 away) and scorelines look like real PL data.
+  API responses are cached for 6h in `data/cache/`. The free tier only
+  returns the current season, so with a key the model trains on this
+  season's finished matches; scores are delayed, not live.
+- **Fallback (offline):** bundled sample datasets
+  - `data/sample/pl_matches.csv` — 480 realistic Premier League matches
+    (2024-25 full season, 380 + 2025-26 first 10 rounds, 100), generated with a
+    seeded round-robin schedule and team strengths so home-win rate (~47%),
+    goals (~1.59 home / 1.27 away) and scorelines look like real PL data.
+  - `data/sample/international_matches.csv` — 480 real senior men's
+    international results, 2024-01-12 to 2026-10-06, 168 national teams.
+    Source: [martj42/international_results](https://github.com/martj42/international_results)
+    (`results.csv`, public domain), filtered to competitive matches:
+    the finals of the 2026 World Cup, Euro 2024, Copa América 2024,
+    AFCON 2023/2025, Gold Cup 2025 and AFC Asian Cup 2023, plus the
+    most recent qualifiers and Nations League matches.
   Any CSV with columns `date,season,league,home_team,away_team,home_goals,
   away_goals,home_odds,draw_odds,away_odds` works via `CsvProvider`.
+
+## International tournaments
+
+World Cup (WC) and Euros (EC) run on their **own rating pool** of national
+teams — club Elo is never mixed with international Elo. With no data key,
+both use the bundled international sample above; with
+`FOOTBALL_DATA_API_KEY` set, they use the live football-data.org
+competition instead (current season only, so a World Cup/Euros season
+may hold few matches outside tournament years).
+
+Two things are different from club football, and the model accounts for
+both:
+
+- **Neutral venues:** 347 of the 480 bundled matches were played at a
+  neutral venue and the listed "home" team is nominal, so the
+  international pool is fitted with **no Elo home advantage**
+  (`Predictor(home_advantage=0.0)`); club leagues keep the usual +60.
+- **Only national teams are predictable offline:** a team needs at least
+  one match in the bundled sample to be known (168 teams). Anything
+  outside it returns a 400 with "did you mean" suggestions, same as an
+  unknown club team.
 
 ## Model
 
@@ -199,6 +246,7 @@ chatgpt/     openapi.yaml, gpt-instructions.md, README.md (Custom GPT setup)
 render.yaml  free Render deploy for the API
 Dockerfile   container deploy for the API
 data/sample/pl_matches.csv   bundled offline dataset (480 matches)
+data/sample/international_matches.csv  bundled international results (480 matches)
 tests/       pytest: Elo, Poisson, Dixon-Coles, no-leakage backtest, CLI smoke, API, web page
 ```
 
