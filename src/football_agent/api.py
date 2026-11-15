@@ -310,11 +310,14 @@ def _predict_one(home: str, away: str, league: str) -> PredictionOut:
 # The key is sent as a header, never in a URL, and never logged or
 # returned.
 #
-# Timing: the search itself is slow — a live web-searched call took
-# 57s against the real key, while plain calls answer in ~1s. The
-# AgentRouter timeout is therefore 90s and the whole-briefing budget
-# 95s; the page shows a loading state for that long, and the 15-minute
-# cache makes repeat requests instant.
+# Timing: the search itself is slow — plain calls answer in ~3s and a
+# trivial web-searched call in ~5s, but the briefing's web search is
+# heavier: the simple single-search prompt typically answers in
+# ~40-70s against the real key (the earlier open-ended prompt took
+# 130s+ and timed out). The AgentRouter timeout is therefore 90s and
+# the whole-briefing budget 95s, with one bounded retry for a fast
+# failure only; the page shows a loading state for that long, and the
+# 15-minute cache makes repeat requests instant.
 # ---------------------------------------------------------------------------
 
 AGENTROUTER_MODEL = os.environ.get("AGENTROUTER_MODEL", "gpt-5.6-sol")
@@ -325,6 +328,10 @@ AGENTROUTER_FINGERPRINT_HEADERS = {
     "anthropic-version": "2023-06-01",
 }
 AGENTROUTER_TIMEOUT_S = 90
+# A fast AgentRouter failure (e.g. a transient unreadable gateway
+# response) is retried once; a failure that took this long or more
+# has already spent the budget and is not retried.
+AGENTROUTER_FAST_RETRY_S = 30
 BRIEF_TOTAL_BUDGET_S = 95  # wall-clock budget for the whole briefing
 BRIEF_CACHE_TTL_S = 15 * 60  # save free-tier quota: one briefing per pair/15 min
 BRIEF_CACHE_MAX = 200
@@ -388,18 +395,27 @@ def _brief_prompt_knowledge(home: str, away: str, league: str,
 
 
 def _brief_prompt(home: str, away: str, league: str, today: str) -> str:
+    """Single-search briefing prompt.
+
+    The earlier open-ended prompt ("search the web for this fixture")
+    let the model run search after search and took 130s+ against the
+    real key, past the endpoint's budget. This version asks for ONE
+    search with a fixed query and answers from that result only; it
+    was verified live at ~40-70s. Same JSON keys and rules as before.
+    """
     league_name = _LEAGUE_NAMES.get(league.upper(), league)
     return (
         f"Today is {today}. The football match is {home} vs {away} "
-        f"({league_name}).\n\n"
-        "Use the web search tool to search the web for this fixture, "
-        "then return a JSON object (no other text) with exactly these keys:\n"
+        f"({league_name}). Use the web search tool ONCE to search for "
+        f"'{home} vs {away} latest news injuries form' — one search only, "
+        "do not run more searches — then, using ONLY that search result, "
+        "return a JSON object (no other text) with exactly these keys:\n"
         '{"summary": "2-3 sentence overview of the match context", '
         '"form": ["<team>: last-5 results, e.g. W W D L W, with scores if found"], '
         '"injuries": ["<player> (<team>) — injury or suspension detail, or empty if none found"], '
         '"news": ["any other relevant team news"]}\n\n'
         "Rules:\n"
-        "- Use ONLY what you find in the web search results. If a section "
+        "- Use ONLY what you find in the web search result. If a section "
         "has no reliable information, use an empty list.\n"
         "- Cite every factual claim with a source link in the text, like "
         "[ESPN](https://www.espn.com/soccer/...).\n"
@@ -645,8 +661,14 @@ def _build_brief(home: str, away: str, league: str,
     knowledge-only fallback answers. Raises _BriefError on any
     failure. Total wall-clock budget is BRIEF_TOTAL_BUDGET_S; the
     fallback only runs if time is left in that budget.
+
+    A fast AgentRouter failure (elapsed < AGENTROUTER_FAST_RETRY_S,
+    e.g. a transient unreadable gateway response) is retried once
+    before falling back; a slow failure has already spent the budget
+    and is not retried.
     """
-    deadline = time.monotonic() + BRIEF_TOTAL_BUDGET_S
+    started = time.monotonic()
+    deadline = started + BRIEF_TOTAL_BUDGET_S
 
     def _timeout(cap: float) -> float:
         remaining = deadline - time.monotonic()
@@ -662,6 +684,15 @@ def _build_brief(home: str, away: str, league: str,
             parsed["live_search"] = True
             return parsed
         except _BriefError:
+            if time.monotonic() - started < AGENTROUTER_FAST_RETRY_S:
+                try:
+                    parsed = _summarise_with_agentrouter(
+                        home, away, league, agentrouter_key,
+                        _timeout(AGENTROUTER_TIMEOUT_S))
+                    parsed["live_search"] = True
+                    return parsed
+                except _BriefError:
+                    pass
             if not xingchi_key:
                 raise
     if not xingchi_key:

@@ -173,10 +173,13 @@ def test_ai_brief_success_agentrouter(monkeypatch):
         assert sent["model"] == api.AGENTROUTER_MODEL
         assert "Arsenal" in sent["input"] and "Chelsea" in sent["input"]
         # The call searches the web: the web_search tool is attached and
-        # the prompt tells the model to use only the search results.
+        # the prompt tells the model to run one search only and use
+        # only that search result.
         assert sent["tools"] == [{"type": "web_search"}]
         assert "web search" in sent["input"].lower()
-        assert "Use ONLY what you find in the web search results" in sent["input"]
+        assert "one search only" in sent["input"].lower()
+        assert "do not run more searches" in sent["input"].lower()
+        assert "Use ONLY what you find in the web search result" in sent["input"]
         # A repeat request for the same pair is served from cache.
         r2 = _post_brief(client)
         assert r2.status_code == 200
@@ -267,12 +270,12 @@ def test_ai_brief_agentrouter_failure_falls_back_to_xingchi(monkeypatch):
     assert body["sources"] == []
     assert "xingchi-test-key" not in r.text
     assert "agentrouter-test-key" not in r.text
-    # Two calls: AgentRouter first, then Xingchi.
-    assert mock_post.call_count == 2
+    # Three calls: AgentRouter first, its one retry, then Xingchi.
+    assert mock_post.call_count == 3
     ar_args, ar_kwargs = mock_post.call_args_list[0]
     assert ar_args[0] == api.AGENTROUTER_RESPONSES_URL
     assert ar_kwargs["json"]["tools"] == [{"type": "web_search"}]
-    xc_args, xc_kwargs = mock_post.call_args_list[1]
+    xc_args, xc_kwargs = mock_post.call_args_list[2]
     assert xc_args[0] == api.XINGCHI_CHAT_URL
     assert xc_kwargs["headers"]["Authorization"] == "Bearer xingchi-test-key"
     assert xc_kwargs["headers"]["User-Agent"] == (
@@ -289,7 +292,98 @@ def test_ai_brief_agentrouter_failure_falls_back_to_xingchi(monkeypatch):
     # A repeat request for the same pair is served from cache.
     r2 = _post_brief(client)
     assert r2.status_code == 200
+    assert mock_post.call_count == 3
+
+
+def test_brief_prompt_is_single_search():
+    """The briefing prompt asks for exactly one search and keeps the
+    same JSON keys and rules as the verified-live prompt."""
+    prompt = api._brief_prompt("Arsenal", "Chelsea", "PL", "2026-11-16")
+    assert "one search only" in prompt.lower()
+    assert "do not run more searches" in prompt.lower()
+    assert "'Arsenal vs Chelsea latest news injuries form'" in prompt
+    assert "Premier League" in prompt
+    for key in ('"summary"', '"form"', '"injuries"', '"news"'):
+        assert key in prompt
+    assert "Cite every factual claim" in prompt
+    assert "Do NOT invent players, results, or injuries" in prompt
+    assert "Do NOT predict a winner, scoreline, or probabilities" in prompt
+    assert "Do NOT mention odds" in prompt
+
+
+def test_ai_brief_fast_failure_retried_once_then_succeeds(monkeypatch):
+    """A fast AgentRouter failure is retried once; a retry success
+    returns a live briefing."""
+    _set_key(monkeypatch)
+    calls = {"n": 0}
+
+    def flaky(url, **kwargs):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return _FakeResponse(
+                500, {"error": {"message": "gateway error"}})
+        return _FakeResponse(200, FAKE_AGENTROUTER_OK)
+
+    with _client() as client, patch(
+            "football_agent.api.requests.post",
+            side_effect=flaky) as mock_post:
+        r = _post_brief(client)
+    _assert_briefing_body(r)
     assert mock_post.call_count == 2
+    assert all(c[0][0] == api.AGENTROUTER_RESPONSES_URL
+               for c in mock_post.call_args_list)
+
+
+def test_build_brief_slow_failure_not_retried():
+    """A slow AgentRouter failure is not retried (one call only).
+
+    The fake clock advances 31s inside the failing call, so the
+    elapsed time is past the 30s fast-retry window; _build_brief is
+    called directly to keep the fake clock out of the HTTP stack.
+    """
+    calls = {"n": 0}
+    clock = {"t": 1000.0}
+
+    def fake_monotonic():
+        return clock["t"]
+
+    def failing(*args, **kwargs):
+        calls["n"] += 1
+        clock["t"] += 31.0  # the call took 31s
+        raise api._BriefError("AgentRouter returned HTTP 500")
+
+    with patch("football_agent.api.time.monotonic",
+               side_effect=fake_monotonic), patch(
+            "football_agent.api._summarise_with_agentrouter",
+            side_effect=failing):
+        with pytest.raises(api._BriefError):
+            api._build_brief("Arsenal", "Chelsea", "PL",
+                             "agentrouter-test-key", None)
+    assert calls["n"] == 1
+
+
+def test_ai_brief_retry_failure_falls_back_to_xingchi(monkeypatch):
+    """AgentRouter fails twice (first try + one retry), then Xingchi
+    answers with a knowledge-only briefing."""
+    _set_keys(monkeypatch)
+    with _client() as client, patch(
+            "football_agent.api.requests.post",
+            side_effect=_dispatch({
+                api.AGENTROUTER_RESPONSES_URL: _FakeResponse(
+                    500, {"error": {"message": "gateway error"}}),
+                api.XINGCHI_CHAT_URL: _FakeResponse(200, FAKE_XINGCHI_OK),
+            })) as mock_post:
+        r = _post_brief(client)
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["live_search"] is False
+    assert body["sources"] == []
+    assert "good form" in body["summary"]
+    # Three calls: AgentRouter, its one retry, then Xingchi.
+    assert mock_post.call_count == 3
+    assert mock_post.call_args_list[0][0][0] == api.AGENTROUTER_RESPONSES_URL
+    assert mock_post.call_args_list[1][0][0] == api.AGENTROUTER_RESPONSES_URL
+    assert mock_post.call_args_list[2][0][0] == api.XINGCHI_CHAT_URL
 
 
 def test_ai_brief_both_fail_502(monkeypatch):
@@ -354,7 +448,7 @@ def test_ai_brief_no_keys_503(monkeypatch):
 
 
 def test_ai_brief_agentrouter_fails_no_xingchi_key_502(monkeypatch):
-    """AgentRouter fails and no Xingchi key: 502, as before."""
+    """AgentRouter fails (first try + one retry) and no Xingchi key: 502."""
     _set_keys(monkeypatch, agentrouter=True, xingchi=False)
     with _client() as client, patch(
             "football_agent.api.requests.post",
@@ -362,7 +456,7 @@ def test_ai_brief_agentrouter_fails_no_xingchi_key_502(monkeypatch):
                 500, {"error": {"message": "gateway error"}})) as mock_post:
         r = _post_brief(client)
     assert r.status_code == 502, r.text
-    assert mock_post.call_count == 1
+    assert mock_post.call_count == 2
     assert mock_post.call_args[0][0] == api.AGENTROUTER_RESPONSES_URL
 
 
