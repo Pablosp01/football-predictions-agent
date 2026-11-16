@@ -611,6 +611,14 @@ def test_brief_prompt_no_upcoming_fixture_fallback():
     assert "latest news for each team" in prompt
 
 
+def test_brief_prompt_knowledge_no_upcoming_fixture_fallback():
+    prompt = api._brief_prompt_knowledge("Arsenal", "Chelsea", "PL",
+                                         "2026-11-16")
+    assert "no upcoming fixture" in prompt
+    assert "do NOT leave everything empty" in prompt
+    assert "latest news and recent form for each team" in prompt
+
+
 def test_ai_brief_same_team_400(monkeypatch):
     _set_key(monkeypatch)
     with _client() as client:
