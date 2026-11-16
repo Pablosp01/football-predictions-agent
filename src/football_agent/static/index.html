@@ -492,7 +492,8 @@ function parseChatMessage(text, pendingTeam, defaultLeague) {
       /^(hi|hello|hey|yo|hiya|good morning|good afternoon|good evening)\b/.test(normed)) {
     return { kind: "greeting" };
   }
-  var league = chatFindLeague(normed) || defaultLeague || "PL";
+  var namedLeague = chatFindLeague(normed);
+  var league = namedLeague || defaultLeague || "PL";
   var teams = chatFindTeams(normed);
   var hasMatchWords = /\b(match|matches|game|games|fixture|fixtures)\b/.test(normed);
   // Head-to-head: two teams + "head to head" / "h2h".
@@ -505,19 +506,21 @@ function parseChatMessage(text, pendingTeam, defaultLeague) {
   if (teams.length === 0 &&
       (hasMatchWords || /\b(predict|prediction)\b/.test(normed)) &&
       (/\btoday'?s\b/.test(normed) || /\btoday\b/.test(normed))) {
-    return { kind: "today", when: "today", league: league };
+    return { kind: "today", when: "today", league: league,
+             leagueNamed: !!namedLeague };
   }
   if (teams.length === 0 &&
       (hasMatchWords || /\b(predict|prediction)\b/.test(normed)) &&
       (/\btomorrow'?s\b/.test(normed) || /\btomorrow\b/.test(normed))) {
-    return { kind: "today", when: "tomorrow", league: league };
+    return { kind: "today", when: "tomorrow", league: league,
+             leagueNamed: !!namedLeague };
   }
   if (teams.length === 0 &&
       (/\bwhat'?s on\b/.test(normed) || /\bwhat is on\b/.test(normed)) &&
       (/\btoday\b/.test(normed) || /\btomorrow\b/.test(normed))) {
     return { kind: "today",
              when: /\btomorrow\b/.test(normed) ? "tomorrow" : "today",
-             league: league };
+             league: league, leagueNamed: !!namedLeague };
   }
   // This weekend: the fixtures feed is day-by-day, so point at today.
   if (teams.length === 0 && /\bweekend\b/.test(normed)) {
@@ -1129,12 +1132,17 @@ function parseChatMessage(text, pendingTeam, defaultLeague) {
     ul.className = "scores";
     items.forEach(function (item) {
       var d = item.prediction || item;
-      var pick = d.match_pick
-        ? (d.match_pick.outcome === "home" ? d.home_team + " win"
-           : d.match_pick.outcome === "away" ? d.away_team + " win" : "Draw")
-        : "—";
-      var p = d.match_pick ? d.match_pick.probability : d.confidence;
       var li = document.createElement("li");
+      if (!d.match_pick) {
+        // Listed but not predictable (that league needs live data).
+        li.innerHTML = "<span>" + esc(d.home_team) + " vs " + esc(d.away_team) + "</span>" +
+          "<span>No prediction yet — needs live data</span>";
+        ul.appendChild(li);
+        return;
+      }
+      var pick = d.match_pick.outcome === "home" ? d.home_team + " win"
+        : d.match_pick.outcome === "away" ? d.away_team + " win" : "Draw";
+      var p = d.match_pick.probability;
       li.style.cursor = "pointer";
       li.innerHTML = "<span>" + esc(d.home_team) + " vs " + esc(d.away_team) + "</span>" +
         "<span>Pick: <b>" + esc(pick) + "</b> (" + pct(p) + ")</span>";
@@ -1151,17 +1159,40 @@ function parseChatMessage(text, pendingTeam, defaultLeague) {
     return div;
   }
 
-  function chatToday(when, league) {
+  function chatToday(when, league, leagueNamed) {
     var off = when === "tomorrow" ? 1 : 0;
-    var label = (when === "tomorrow" ? "Tomorrow" : "Today") +
-      " (" + chatDayLabel(off) + ") — " + league;
+    var dayName = (when === "tomorrow" ? "Tomorrow" : "Today") +
+      " (" + chatDayLabel(off) + ")";
+    if (!leagueNamed) {
+      // What matches are actually on today, across the competitions:
+      // the /today endpoint lists the real fixtures (ESPN) with the
+      // model's pick for each. On an international-break Monday that
+      // is the Nations League, not an empty Premier League day.
+      chatGet("/today?date=" + chatIsoDate(off),
+              "Checking " + (when === "tomorrow" ? "tomorrow" : "today") + "’s matches…")
+        .then(function (body) {
+          if (!body) return;
+          if (!body.groups || !body.groups.length) {
+            addChatMsg("agent", "<b>" + esc(dayName) + " — no matches.</b><br>" +
+              esc(body.message || "No matches on that date."));
+            return;
+          }
+          body.groups.forEach(function (g) {
+            renderQuickList(g.label + " — " + dayName + " (" + g.fixtures.length +
+              (g.fixtures.length === 1 ? " match)" : " matches)"), g.fixtures);
+          });
+        });
+      return;
+    }
+    // One league named ("today's La Liga matches"): that league only.
+    var label = dayName + " — " + league;
     chatGet("/fixtures?league=" + encodeURIComponent(league) +
             "&date=" + chatIsoDate(off),
             "Checking " + (when === "tomorrow" ? "tomorrow" : "today") + "’s fixtures…")
       .then(function (body) {
         if (!body) return;
         if (!body.fixtures || !body.fixtures.length) {
-          addChatMsg("agent", "<b>" + esc(label) + " — no matches in the data.</b><br>" +
+          addChatMsg("agent", "<b>" + esc(label) + " — no matches.</b><br>" +
             esc(body.message || "No fixtures on that date.") +
             "<br>Name any two teams and I’ll predict that match instead.");
           return;
@@ -1210,7 +1241,12 @@ function parseChatMessage(text, pendingTeam, defaultLeague) {
       .finally(function () { setChatBusy(false); });
   }
 
-  function chatForm(team, league) {
+  // NOTE: this must NOT be called chatForm — the chatbot form element
+  // already owns that name (var chatForm = getElementById(...)), and a
+  // function with the same name is overwritten by the element at
+  // runtime, so calling it throws "not a function" and the question
+  // dies silently. That was the 2026-11-16 form bug.
+  function chatTeamForm(team, league) {
     chatGet("/team?team=" + encodeURIComponent(team) +
             "&league=" + encodeURIComponent(league),
             "Checking " + team + "’s form…")
@@ -1308,14 +1344,14 @@ function parseChatMessage(text, pendingTeam, defaultLeague) {
     var res = parseChatMessage(raw, pendingTeam, leagueSelect.value);
     if (res.kind === "greeting") { addChatMsg("agent", CHAT_GREETING); return; }
     if (res.kind === "help") { addChatMsg("agent", CHAT_HELP); return; }
-    if (res.kind === "today") { chatToday(res.when, res.league); return; }
+    if (res.kind === "today") { chatToday(res.when, res.league, res.leagueNamed); return; }
     if (res.kind === "weekend") {
       addChatMsg("agent", "I list matches day by day — try <b>“today’s matches”</b> " +
         "or <b>“tomorrow’s matches”</b>.");
       return;
     }
     if (res.kind === "ratings") { chatRatings(res.league); return; }
-    if (res.kind === "form") { chatForm(res.team, res.league); return; }
+    if (res.kind === "form") { chatTeamForm(res.team, res.league); return; }
     if (res.kind === "next") { chatNext(res.team, res.league); return; }
     if (res.kind === "h2h") { chatH2H(res.home, res.away, res.league); return; }
     if (res.kind === "multi") {

@@ -196,6 +196,102 @@ class FootballDataOrgProvider:
         )
 
 
+# ESPN scoreboard (free, no key): the day's fixtures per competition.
+# Verified 2026-11-16: the scoreboard returns the day's events with
+# state "pre" (scheduled), "in" (live) or "post" (finished); only
+# "pre" events are fixtures. Club leagues map to our league codes;
+# the UEFA Nations League is the international competition that
+# actually plays on international-break days (e.g. Mon 16 Nov 2026:
+# 10 Nations League matches, no club football at all). ESPN team
+# names are display names ("Manchester City", "Newcastle United") —
+# the API's resolve_team() maps them to the model's canonical names.
+ESPN_LEAGUE_SLUGS = {
+    "PL": "eng.1", "PD": "esp.1", "SA": "ita.1", "BL1": "ger.1",
+    "FL1": "fra.1", "DED": "ned.1", "PPL": "por.1", "BSA": "bra.1",
+    "CL": "uefa.champions",
+}
+ESPN_INTL_SLUGS = ("uefa.nations",)
+ESPN_CACHE_TTL = timedelta(minutes=30)
+_espn_cache: dict[str, tuple[datetime, list[Match]]] = {}
+
+
+def clear_espn_cache() -> None:
+    """For tests: drop cached ESPN scoreboard days."""
+    _espn_cache.clear()
+
+
+def _espn_day(slug: str, on: date, league: str) -> list[Match]:
+    """One ESPN scoreboard day: scheduled fixtures only, cached 30 min.
+
+    Raises on transport failure so the caller can fall back to the
+    bundled sample (which has no future fixtures and says so).
+    """
+    key = f"{slug}|{on.isoformat()}"
+    now = datetime.now()
+    hit = _espn_cache.get(key)
+    if hit and now - hit[0] < ESPN_CACHE_TTL:
+        return hit[1]
+    url = ("https://site.api.espn.com/apis/site/v2/sports/soccer/"
+           f"{slug}/scoreboard?dates={on.strftime('%Y%m%d')}")
+    resp = requests.get(url, timeout=15)
+    resp.raise_for_status()
+    out: list[Match] = []
+    # Kickoff order: the day's matches in the order they happen.
+    events = sorted(resp.json().get("events", []),
+                    key=lambda e: e.get("date", ""))
+    for event in events:
+        if event.get("status", {}).get("type", {}).get("state") != "pre":
+            continue  # live or finished: not a fixture to predict
+        comps = event.get("competitions", [{}])[0]
+        teams = comps.get("competitors", [])
+        home = next((t["team"].get("displayName") for t in teams
+                     if t.get("homeAway") == "home"), None)
+        away = next((t["team"].get("displayName") for t in teams
+                     if t.get("homeAway") == "away"), None)
+        if not home or not away:
+            continue
+        day = datetime.fromisoformat(
+            event["date"].replace("Z", "+00:00")).date()
+        out.append(Match(date=day, season="", league=league,
+                         home_team=home, away_team=away))
+    # Stable by date: within a day the kickoff order above is kept.
+    out.sort(key=lambda m: m.date)
+    _espn_cache[key] = (now, out)
+    return out
+
+
+class EspnProvider:
+    """Free ESPN scoreboard fixtures (no key) — fixtures only.
+
+    History still comes from the sample or football-data.org; ESPN
+    only answers "what matches are on this day".
+    """
+
+    def fixtures(self, league: str = "PL",
+                 on: date | None = None) -> list[Match]:
+        slug = ESPN_LEAGUE_SLUGS.get(league)
+        if slug is None:
+            return []
+        if on is not None:
+            return _espn_day(slug, on, league)
+        # No date: the next 10 days' scheduled fixtures (the "next
+        # match" flow) — a league plays roughly weekly, so this is
+        # a couple of matchdays, not a whole season.
+        out: list[Match] = []
+        today = date.today()
+        for i in range(10):
+            out.extend(_espn_day(slug, today + timedelta(days=i), league))
+        # Stable by date: within a day the kickoff order is kept.
+        return sorted(out, key=lambda m: m.date)
+
+    def intl_fixtures(self, on: date) -> list[Match]:
+        """International matches on a day (UEFA Nations League)."""
+        out: list[Match] = []
+        for slug in ESPN_INTL_SLUGS:
+            out.extend(_espn_day(slug, on, "WC"))
+        return sorted(out, key=lambda m: m.date)
+
+
 def get_provider(league: str = "PL") -> Provider:
     """Prefer the live API when a key is set, else the bundled sample data.
 

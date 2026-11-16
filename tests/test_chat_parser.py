@@ -85,8 +85,11 @@ def test_chat_parser_fields():
 
     today = by_text["predict today's matches"]
     assert today["when"] == "today" and today["league"] == "PL"
+    assert today["leagueNamed"] is False
     assert by_text["tomorrow's matches"]["when"] == "tomorrow"
-    assert by_text["Today's La Liga matches"]["league"] == "PD"
+    assert by_text["tomorrow's matches"]["leagueNamed"] is False
+    la_liga = by_text["Today's La Liga matches"]
+    assert la_liga["league"] == "PD" and la_liga["leagueNamed"] is True
 
     multi = by_text["Arsenal vs Chelsea and Man Utd vs Liverpool"]
     assert multi["pairs"] == [["Arsenal", "Chelsea"],

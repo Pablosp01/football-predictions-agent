@@ -6,19 +6,60 @@ import os
 
 import pytest
 from fastapi.testclient import TestClient
+from unittest.mock import patch
 
 os.environ["FOOTBALL_DATA_API_KEY"] = ""
 os.environ.pop("API_KEY", None)
 
 from football_agent import api  # noqa: E402
+from football_agent.data.providers import clear_espn_cache  # noqa: E402
+
+
+def _espn_event(when, state, home, away):
+    return {
+        "date": when,
+        "status": {"type": {"state": state}},
+        "competitions": [{"competitors": [
+            {"homeAway": "home", "team": {"displayName": home}},
+            {"homeAway": "away", "team": {"displayName": away}},
+        ]}],
+    }
+
+
+class _FakeEspnResponse:
+    def __init__(self, payload):
+        self._payload = payload
+
+    def json(self):
+        return self._payload
+
+    def raise_for_status(self):
+        pass
+
+
+# Mon 16 Nov 2026: Nations League day (two scheduled, one finished);
+# no club league has a match that day.
+_ESPN_NATIONS_DAY = {"events": [
+    _espn_event("2026-11-16T17:00Z", "pre", "Iceland", "Luxembourg"),
+    _espn_event("2026-11-16T19:45Z", "pre", "Germany", "Netherlands"),
+    _espn_event("2026-11-16T15:00Z", "post", "Faroe Islands", "Moldova"),
+]}
+
+
+def _fake_espn_get(url, timeout=None):
+    if "uefa.nations" in url:
+        return _FakeEspnResponse(_ESPN_NATIONS_DAY)
+    return _FakeEspnResponse({"events": []})
 
 
 @pytest.fixture()
 def client():
     api.clear_cache()
+    clear_espn_cache()
     with TestClient(api.app) as c:
         yield c
     api.clear_cache()
+    clear_espn_cache()
 
 
 def test_health(client):
@@ -78,25 +119,147 @@ def test_predict_batch_ranked(client):
 
 
 def test_fixtures_sample_data_has_no_future_fixtures(client):
-    r = client.get("/fixtures", params={"league": "PL", "date": "2026-11-15"})
+    # ESPN is the fixtures source when no data key is set; it says
+    # there are no PL matches on 2026-11-15 (international break).
+    from football_agent.data.providers import clear_espn_cache
+    clear_espn_cache()
+    with patch("football_agent.data.providers.requests.get",
+               return_value=_FakeEspnResponse({"events": []})):
+        r = client.get("/fixtures", params={"league": "PL", "date": "2026-11-15"})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["fixtures"] == []
+    assert body["message"] == "No PL matches on 2026-11-15."
+
+
+def test_fixtures_espn_lists_real_fixture_with_prediction(client):
+    """ESPN's fixture is listed with the model's prediction, and
+    ESPN names are resolved to the model's canonical names."""
+    from football_agent.data.providers import clear_espn_cache
+    clear_espn_cache()
+    payload = {"events": [_espn_event(
+        "2026-11-21T15:00Z", "pre", "Arsenal", "Newcastle United")]}
+    with patch("football_agent.data.providers.requests.get",
+               return_value=_FakeEspnResponse(payload)):
+        r = client.get("/fixtures", params={"league": "PL", "date": "2026-11-21"})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert len(body["fixtures"]) == 1
+    fx = body["fixtures"][0]
+    assert fx["home_team"] == "Arsenal"
+    assert fx["away_team"] == "Newcastle"  # resolved, not "Newcastle United"
+    assert fx["prediction"] is not None
+    assert fx["prediction"]["match_pick"]["outcome"] == "home"
+
+
+def test_fixtures_espn_failure_falls_back_to_sample_message(client):
+    """If ESPN cannot be reached, the old sample-data message returns."""
+    from football_agent.data.providers import clear_espn_cache
+    clear_espn_cache()
+
+    def failing(url, timeout=None):
+        raise ConnectionError("down")
+
+    with patch("football_agent.data.providers.requests.get",
+               side_effect=failing):
+        r = client.get("/fixtures", params={"league": "PL", "date": "2026-11-15"})
     assert r.status_code == 200, r.text
     body = r.json()
     assert body["fixtures"] == []
     assert "FOOTBALL_DATA_API_KEY" in body["message"]
 
 
-def test_fixtures_team_filter_sample_data_empty(client):
-    # The bundled sample has no future fixtures, so a team filter
-    # still returns the empty list (and the key hint), not an error.
-    r = client.get("/fixtures", params={"league": "PL", "team": "Arsenal"})
+def test_fixtures_team_filter_espn(client):
+    from football_agent.data.providers import clear_espn_cache
+    clear_espn_cache()
+    payload = {"events": [
+        _espn_event("2026-11-21T15:00Z", "pre", "Arsenal", "Newcastle United"),
+        _espn_event("2026-11-21T17:30Z", "pre", "Chelsea", "Liverpool"),
+    ]}
+    with patch("football_agent.data.providers.requests.get",
+               return_value=_FakeEspnResponse(payload)):
+        r = client.get("/fixtures", params={
+            "league": "PL", "team": "Arsenal", "date": "2026-11-21"})
     assert r.status_code == 200, r.text
     body = r.json()
-    assert body["fixtures"] == []
-    assert "FOOTBALL_DATA_API_KEY" in body["message"]
+    assert len(body["fixtures"]) == 1
+    assert body["fixtures"][0]["home_team"] == "Arsenal"
+
+
+def test_today_lists_nations_league_matches(client):
+    """Mon 16 Nov 2026: no club football, but 10 Nations League
+    matches — /today lists the real ones with predictions."""
+    from football_agent.data.providers import clear_espn_cache
+    clear_espn_cache()
+    with patch("football_agent.data.providers.requests.get",
+               side_effect=_fake_espn_get):
+        r = client.get("/today", params={"date": "2026-11-16"})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["date"] == "2026-11-16"
+    assert len(body["groups"]) == 1
+    group = body["groups"][0]
+    assert group["label"] == "UEFA Nations League"
+    assert len(group["fixtures"]) == 2  # finished match excluded
+    fx = group["fixtures"][0]
+    assert fx["home_team"] == "Iceland" and fx["away_team"] == "Luxembourg"
+    assert fx["prediction"] is not None
+    assert fx["prediction"]["match_pick"] is not None
+    assert fx["prediction"]["league"] == "WC"
+
+
+def test_today_no_matches_message(client):
+    from football_agent.data.providers import clear_espn_cache
+    clear_espn_cache()
+    with patch("football_agent.data.providers.requests.get",
+               return_value=_FakeEspnResponse({"events": []})):
+        r = client.get("/today", params={"date": "2026-11-16"})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["groups"] == []
+    assert body["message"].startswith("No matches on 2026-11-16")
+
+
+def test_today_invalid_date_400(client):
+    r = client.get("/today", params={"date": "16-11-2026"})
+    assert r.status_code == 400, r.text
+
+
+def test_fixtures_team_filter_espn_no_date(client):
+    # No date: ESPN's next-10-days scan. The fake answers only on
+    # 2026-11-21, five days after the fixed "today".
+    from datetime import date as _date
+    from football_agent.data.providers import clear_espn_cache
+    clear_espn_cache()
+
+    class _FixedDate(_date):
+        @classmethod
+        def today(cls):
+            return _date(2026, 11, 16)
+
+    payload = {"events": [_espn_event(
+        "2026-11-21T15:00Z", "pre", "Arsenal", "Newcastle United")]}
+
+    def dated(url, timeout=None):
+        if "dates=20261121" in url:
+            return _FakeEspnResponse(payload)
+        return _FakeEspnResponse({"events": []})
+
+    with (patch("football_agent.data.providers.requests.get",
+                side_effect=dated),
+          patch("football_agent.data.providers.date", _FixedDate)):
+        r = client.get("/fixtures", params={"league": "PL", "team": "Arsenal"})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert len(body["fixtures"]) == 1
+    assert body["fixtures"][0]["home_team"] == "Arsenal"
+    assert body["fixtures"][0]["away_team"] == "Newcastle"
 
 
 def test_fixtures_unknown_team_400(client):
-    r = client.get("/fixtures", params={"league": "PL", "team": "Arsenl"})
+    with patch("football_agent.data.providers.requests.get",
+               return_value=_FakeEspnResponse({"events": []})):
+        r = client.get("/fixtures", params={"league": "PL", "team": "Arsenl"})
     assert r.status_code == 400, r.text
     assert "Arsenal" in r.json()["detail"]["did_you_mean"]
 

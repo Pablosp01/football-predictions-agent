@@ -29,7 +29,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
 from .backtest import walk_forward
-from .data.providers import INTERNATIONAL_LEAGUES, get_provider
+from .data.providers import INTERNATIONAL_LEAGUES, EspnProvider, get_provider
 from .model.predict import Predictor
 
 MODEL_NAME = "Elo + Dixon-Coles Poisson"
@@ -109,10 +109,18 @@ def _require_known_league(league: str) -> str:
 
 
 def _known_teams(league: str) -> list[str]:
-    provider = get_provider(league)
-    teams = {m.home_team for m in provider.matches(league)}
-    teams |= {m.away_team for m in provider.matches(league)}
-    return sorted(teams)
+    """Canonical team names for a league, cached per process.
+
+    The underlying data does not change while the server runs (a new
+    deploy or a changed data key restarts it); tests reset it with
+    clear_cache().
+    """
+    if league not in _known_teams_cache:
+        provider = get_provider(league)
+        matches = provider.matches(league)
+        _known_teams_cache[league] = sorted(
+            {m.home_team for m in matches} | {m.away_team for m in matches})
+    return _known_teams_cache[league]
 
 
 def resolve_team(name: str, league: str) -> str:
@@ -149,6 +157,7 @@ def resolve_team(name: str, league: str) -> str:
 
 _predictors: dict[str, Predictor] = {}
 _matches_cache: dict[str, list] = {}
+_known_teams_cache: dict[str, list[str]] = {}
 
 
 def get_predictor(league: str) -> Predictor:
@@ -178,6 +187,7 @@ def clear_cache() -> None:
     """For tests: drop cached predictors so a fresh fit happens."""
     _predictors.clear()
     _matches_cache.clear()
+    _known_teams_cache.clear()
 
 
 # ---------------------------------------------------------------------------
@@ -1093,6 +1103,39 @@ def head_to_head_endpoint(home_team: str, away_team: str,
             "source": "model"}
 
 
+def _predict_fixtures(days_fixtures, league: str) -> list[dict]:
+    """Predict a fixture list; fixtures the model cannot resolve or
+    predict keep prediction None.
+
+    Team names are resolved to the model's canonical names first
+    (ESPN says "Manchester City", the model knows "Man City"), and
+    the resolved names are what the output carries. A league the
+    model cannot fit without a data key (every club league except
+    PL) yields prediction None for every fixture.
+    """
+    out: list[dict] = []
+    try:
+        predictor = get_predictor(league)
+    except HTTPException:
+        predictor = None
+    for fx in days_fixtures:
+        item: dict = {"date": fx.date.isoformat(), "home_team": fx.home_team,
+                      "away_team": fx.away_team, "prediction": None}
+        if predictor is not None:
+            try:
+                home = resolve_team(fx.home_team, league)
+                away = resolve_team(fx.away_team, league)
+                pred = _prediction_out(
+                    predictor.predict(home, away, on=fx.date), league)
+                item["home_team"] = home
+                item["away_team"] = away
+                item["prediction"] = pred.model_dump()
+            except HTTPException:
+                pass
+        out.append(item)
+    return out
+
+
 @app.get("/fixtures", dependencies=[Depends(require_api_key)])
 def fixtures(league: str = "PL",
              date: str | None = Query(default=None, examples=["2026-11-15"]),
@@ -1106,29 +1149,40 @@ def fixtures(league: str = "PL",
             raise HTTPException(status_code=400, detail={
                 "error": f"Invalid date '{date}': use YYYY-MM-DD"})
     provider = get_provider(league)
-    days_fixtures = provider.fixtures(league, on)
+    espn_ok = False
+    if os.environ.get("FOOTBALL_DATA_API_KEY"):
+        days_fixtures = provider.fixtures(league, on)
+    else:
+        # Live fixtures from ESPN's free scoreboard (no key). On
+        # failure fall back to the bundled sample, which has no
+        # future fixtures — and says so below.
+        try:
+            days_fixtures = EspnProvider().fixtures(league, on)
+            espn_ok = True
+        except Exception:
+            days_fixtures = provider.fixtures(league, on)
     if team:
         # A team's fixtures only (e.g. its next match): unknown names
-        # get the same 400 + did_you_mean as /predict.
+        # get the same 400 + did_you_mean as /predict. Fixture names
+        # are resolved first — ESPN says "Manchester City", the model
+        # knows "Man City".
         canonical = resolve_team(team, league)
-        days_fixtures = [fx for fx in days_fixtures
-                         if fx.home_team == canonical
-                         or fx.away_team == canonical]
-    out: list[dict] = []
-    predictor = None
-    for fx in days_fixtures:
-        try:
-            predictor = predictor or get_predictor(league)
-            pred = _prediction_out(predictor.predict(fx.home_team, fx.away_team,
-                                                     on=fx.date), league)
-            out.append({"date": fx.date.isoformat(), "home_team": fx.home_team,
-                        "away_team": fx.away_team,
-                        "prediction": pred.model_dump()})
-        except HTTPException:
-            out.append({"date": fx.date.isoformat(), "home_team": fx.home_team,
-                        "away_team": fx.away_team, "prediction": None})
+        kept = []
+        for fx in days_fixtures:
+            try:
+                h = resolve_team(fx.home_team, league)
+                a = resolve_team(fx.away_team, league)
+            except HTTPException:
+                continue
+            if h == canonical or a == canonical:
+                kept.append(fx)
+        days_fixtures = kept
+    out = _predict_fixtures(days_fixtures, league)
     if not out:
-        if os.environ.get("FOOTBALL_DATA_API_KEY"):
+        if espn_ok:
+            # ESPN answered: there really are no matches that day.
+            message = f"No {league} matches on {date or 'that date'}."
+        elif os.environ.get("FOOTBALL_DATA_API_KEY"):
             message = f"No fixtures scheduled on {date or 'that date'} for {league}."
         else:
             matches = _matches_cache.get(league) or provider.matches(league)
@@ -1144,6 +1198,57 @@ def fixtures(league: str = "PL",
         return {"league": league, "date": date, "fixtures": [],
                 "message": message, "source": "model"}
     return {"league": league, "date": date, "fixtures": out, "source": "model"}
+
+
+@app.get("/today", dependencies=[Depends(require_api_key)])
+def today(date: str | None = Query(default=None, examples=["2026-11-16"])) -> dict:
+    """What matches are actually on today (or a given day), with
+    the model's prediction for each.
+
+    Club leagues (PL, PD, SA, BL1, FL1, CL) and the UEFA Nations
+    League, from ESPN's free scoreboard — no key needed. Only
+    matches the model can predict are listed: the other club leagues
+    need FOOTBALL_DATA_API_KEY for history, so their fixtures are
+    skipped here (ask for one league via /fixtures to see them
+    listed). Internationals are predicted with the WC pool.
+    """
+    on = None
+    if date:
+        try:
+            on = _date.fromisoformat(date)
+        except ValueError:
+            raise HTTPException(status_code=400, detail={
+                "error": f"Invalid date '{date}': use YYYY-MM-DD"})
+    on = on or _date.today()
+    espn = EspnProvider()
+    groups: list[dict] = []
+    for league in ("PL", "PD", "SA", "BL1", "FL1", "CL"):
+        try:
+            fixtures = espn.fixtures(league, on)
+        except Exception:
+            continue
+        predicted = [f for f in _predict_fixtures(fixtures, league)
+                     if f["prediction"] is not None]
+        if predicted:
+            groups.append({"league": league,
+                           "label": _LEAGUE_NAMES.get(league, league),
+                           "fixtures": predicted})
+    try:
+        intl = espn.intl_fixtures(on)
+    except Exception:
+        intl = []
+    predicted = [f for f in _predict_fixtures(intl, "WC")
+                 if f["prediction"] is not None]
+    if predicted:
+        groups.append({"league": "WC", "label": "UEFA Nations League",
+                       "fixtures": predicted})
+    if not groups:
+        return {"date": on.isoformat(), "groups": [],
+                "message": (f"No matches on {on.isoformat()} in the covered "
+                            "competitions (Premier League, La Liga, Serie A, "
+                            "Bundesliga, Ligue 1, Champions League, Nations League)."),
+                "source": "espn"}
+    return {"date": on.isoformat(), "groups": groups, "source": "espn"}
 
 
 @app.get("/backtest", dependencies=[Depends(require_api_key)])

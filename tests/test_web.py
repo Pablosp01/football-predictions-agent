@@ -3,6 +3,7 @@
 Runs against the bundled offline sample data (FOOTBALL_DATA_API_KEY empty).
 """
 import os
+import re
 
 from fastapi.testclient import TestClient
 
@@ -63,10 +64,25 @@ def test_chatbot_panel_has_wider_chat_examples():
     assert "head to head" in html
     # The new question endpoints are wired into the page JS.
     assert '"/fixtures?league="' in html
+    assert '"/today?date="' in html
     assert '"/team?team="' in html
     assert '"/ratings?league="' in html
     assert '"/head-to-head?home_team="' in html
     assert '"/predict-batch"' in html
+
+
+def test_page_has_no_handler_name_collisions():
+    """A page function must not share its name with a DOM-element
+    variable: the element assignment overwrites the hoisted function,
+    so calling it throws "not a function" and the question dies
+    silently. That was the 2026-11-16 form bug (chatForm was both the
+    form element and the form-answer function)."""
+    with _client() as client:
+        html = client.get("/").text
+    element_vars = set(re.findall(
+        r"var\s+(\w+)\s*=\s*document\.getElementById", html))
+    functions = set(re.findall(r"function\s+(\w+)\s*\(", html))
+    assert not (element_vars & functions), element_vars & functions
 
 
 def test_health_and_docs_still_work():
