@@ -108,6 +108,7 @@
     <button type="button" class="chip" data-home="Man Utd" data-away="Liverpool">Man Utd vs Liverpool</button>
     <button type="button" class="chip" data-home="Liverpool" data-away="Man City">Liverpool vs Man City</button>
     <button type="button" class="chip" data-home="Argentina" data-away="Brazil" data-league="WC">Argentina vs Brazil (World Cup)</button>
+    <button type="button" class="chip" data-home="Iceland" data-away="Luxembourg" data-league="NL">Iceland vs Luxembourg (Nations League)</button>
   </div>
 
   <form id="predict-form">
@@ -129,13 +130,14 @@
           <option value="CL">Champions League (CL)</option>
         </optgroup>
         <optgroup label="International tournaments">
+          <option value="NL">UEFA Nations League (NL)</option>
           <option value="WC">FIFA World Cup (WC)</option>
           <option value="EC">European Championship (EC)</option>
         </optgroup>
       </select>
       <button type="button" class="secondary" id="clear-button">Clear chat</button>
     </div>
-    <p class="note">Premier League, World Cup and Euros work without a data key — other
+    <p class="note">Premier League, Nations League, World Cup and Euros work without a data key — other
       leagues need FOOTBALL_DATA_API_KEY set on the server. The free host sleeps
       when idle, so the first prediction can take up to a minute while it wakes up.</p>
   </form>
@@ -148,6 +150,7 @@
       <button type="button" class="chip" data-chat="Arsenal vs Chelsea">Arsenal vs Chelsea</button>
       <button type="button" class="chip" data-chat="Who wins, Man Utd or Liverpool?">Who wins, Man Utd or Liverpool?</button>
       <button type="button" class="chip" data-chat="Argentina vs Brazil">Argentina vs Brazil</button>
+      <button type="button" class="chip" data-chat="Iceland vs Luxembourg">Iceland vs Luxembourg</button>
       <button type="button" class="chip" data-chat="Today's matches">Today's matches</button>
       <button type="button" class="chip" data-chat="Arsenal's form">Arsenal's form</button>
       <button type="button" class="chip" data-chat="Who will win the Premier League?">Who will win the Premier League?</button>
@@ -159,7 +162,9 @@
     <p class="note">Type the way you would in a chat — nicknames work (“Man Utd”, “Spurs”).
       You can also ask for today’s or tomorrow’s matches, several matches at once,
       a team’s form, head to head, or who will win the league.
-      The league follows the selection in the Predict tab, or name it in your message.</p>
+      The league follows the selection in the Predict tab, or name it in your message.
+      Two national teams (“Iceland vs Luxembourg”) predict as the Nations League
+      automatically.</p>
   </section>
 </div>
 
@@ -435,6 +440,7 @@ var CHAT_LEAGUES = [
   ["PPL", ["primeira liga", "portuguese league"]],
   ["BSA", ["brasileirao", "brazilian league"]],
   ["CL", ["champions league", "ucl"]],
+  ["NL", ["nations league", "uefa nations league", "uefa nations", "nations"]],
   ["WC", ["world cup"]],
   ["EC", ["euros", "european championship", "euro"]]
 ];
@@ -450,6 +456,33 @@ function chatFindLeague(normed) {
     }
   }
   return null;
+}
+
+// Club teams (Premier League sample) — the only club teams in the
+// parser's list. A known team that is not one of these is a national
+// team, which predicts in the international pool.
+var CHAT_CLUB_TEAMS = ["Arsenal", "Aston Villa", "Bournemouth",
+  "Brentford", "Brighton", "Burnley", "Chelsea", "Crystal Palace",
+  "Everton", "Fulham", "Ipswich", "Leeds", "Leicester", "Liverpool",
+  "Man City", "Man Utd", "Newcastle", "Nott'm Forest", "Southampton",
+  "Sunderland", "Tottenham", "West Ham", "Wolves"];
+function chatIsIntlTeam(name) {
+  var n = chatNorm(name);
+  var isClub = CHAT_CLUB_TEAMS.some(function (t) { return chatNorm(t) === n; });
+  if (isClub) return false;
+  return chatFindTeams(n).length > 0;
+}
+
+// The league for a message: a league named in the message wins; two
+// national teams predict as the Nations League (NL) unless a league
+// was named; otherwise the Predict tab's dropdown wins.
+function chatLeagueFor(teams, namedLeague, defaultLeague) {
+  if (namedLeague) return namedLeague;
+  var allIntl = teams.length > 0 && teams.every(function (t) {
+    return chatIsIntlTeam(t);
+  });
+  if (allIntl) return "NL";
+  return defaultLeague || "PL";
 }
 
 function chatCleanSide(s) {
@@ -483,7 +516,8 @@ function chatSplitSides(normed) {
 //   {kind: "multi", pairs, league} | {kind: "form", team, league} |
 //   {kind: "ratings", league} | {kind: "h2h", home, away, league} |
 //   {kind: "next", team, league}
-// "league" is the league named in the message, else defaultLeague.
+// "league" is the league named in the message, else the Nations League
+// for two national teams, else defaultLeague.
 function parseChatMessage(text, pendingTeam, defaultLeague) {
   var normed = chatNorm(text);
   var words = normed.split(" ").filter(function (w) { return w; });
@@ -493,8 +527,8 @@ function parseChatMessage(text, pendingTeam, defaultLeague) {
     return { kind: "greeting" };
   }
   var namedLeague = chatFindLeague(normed);
-  var league = namedLeague || defaultLeague || "PL";
   var teams = chatFindTeams(normed);
+  var league = chatLeagueFor(teams, namedLeague, defaultLeague);
   var hasMatchWords = /\b(match|matches|game|games|fixture|fixtures)\b/.test(normed);
   // Head-to-head: two teams + "head to head" / "h2h".
   if (teams.length >= 2 &&
@@ -968,20 +1002,6 @@ function parseChatMessage(text, pendingTeam, defaultLeague) {
     "the league, and a team’s next match. The league follows the selection in the " +
     "Predict tab, or name it in your message (“today’s La Liga matches”).";
 
-  // Club teams (Premier League sample) — used only to tell a national
-  // team from a club team for the league tip in chatPredictError.
-  var CHAT_CLUB_TEAMS = ["Arsenal", "Aston Villa", "Bournemouth",
-    "Brentford", "Brighton", "Burnley", "Chelsea", "Crystal Palace",
-    "Everton", "Fulham", "Ipswich", "Leeds", "Leicester", "Liverpool",
-    "Man City", "Man Utd", "Newcastle", "Nott'm Forest", "Southampton",
-    "Sunderland", "Tottenham", "West Ham", "Wolves"];
-  function chatIsIntlName(name) {
-    var n = chatNorm(name);
-    var isClub = CHAT_CLUB_TEAMS.some(function (t) { return chatNorm(t) === n; });
-    if (isClub) return false;
-    return chatFindTeams(n).length > 0;
-  }
-
   function addChatMsg(cls, html) { return addMsg(cls, html, chatLog); }
 
   function showTab(which) {
@@ -1022,10 +1042,11 @@ function parseChatMessage(text, pendingTeam, defaultLeague) {
     var detailObj = (detail && typeof detail === "object") ? detail : {};
     if (detailObj.error && detailObj.error.indexOf("Unknown team") === 0 &&
         leagueSelect.value !== "WC" && leagueSelect.value !== "EC" &&
-        chatIsIntlName(home) && chatIsIntlName(away)) {
+        leagueSelect.value !== "NL" &&
+        chatIsIntlTeam(home) && chatIsIntlTeam(away)) {
       var tip = addChatMsg("agent",
         "Those look like national teams — switch the league in the " +
-        "<b>Predict</b> tab to World Cup or Euros, then ask again.");
+        "<b>Predict</b> tab to Nations League, World Cup or Euros, then ask again.");
       void tip;
     }
     return div;

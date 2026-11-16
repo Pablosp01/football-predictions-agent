@@ -56,6 +56,12 @@ CASES = [
     ["Real Madrid vs Barcelona", None, "PD"],
     ["Arsenal vs Chelsea today", None, "PL"],
     ["Argentina vs Brazil", None, "WC"],
+    ["Iceland vs Luxembourg", None, "PL"],
+    ["Germany vs Netherlands", None, "PL"],
+    ["Iceland's form", None, "PL"],
+    ["Who will win the Nations League?", None, "PL"],
+    ["Today's Nations League matches", None, "PL"],
+    ["Argentina vs Brazil world cup", None, "PL"],
 ]
 
 
@@ -76,6 +82,11 @@ def test_chat_parser_kinds():
         "pending", "predict",
         "weekend",
         "predict", "predict", "predict",
+        "predict", "predict",
+        "form",
+        "ratings",
+        "today",
+        "predict",
     ]
 
 
@@ -129,5 +140,21 @@ def test_chat_parser_fields():
     # "today" after a named match is a tail word, not a today request.
     assert by_text["Arsenal vs Chelsea today"]["kind"] == "predict"
 
-    # The league follows the dropdown when the message names none.
-    assert by_text["Argentina vs Brazil"]["league"] == "WC"
+    # Two national teams predict as the Nations League, even when the
+    # dropdown says something else — the old "Unknown team" tip is gone.
+    assert by_text["Argentina vs Brazil"]["league"] == "NL"
+    assert by_text["Iceland vs Luxembourg"] == {
+        "kind": "predict", "home": "Iceland", "away": "Luxembourg",
+        "league": "NL"}
+    assert by_text["Germany vs Netherlands"]["league"] == "NL"
+    assert by_text["Iceland's form"] == {
+        "kind": "form", "team": "Iceland", "league": "NL"}
+    assert by_text["Who will win the Nations League?"] == {
+        "kind": "ratings", "league": "NL"}
+    nations_today = by_text["Today's Nations League matches"]
+    assert nations_today["league"] == "NL"
+    assert nations_today["leagueNamed"] is True
+    # A league named in the message still wins over the NL default.
+    assert by_text["Argentina vs Brazil world cup"] == {
+        "kind": "predict", "home": "Argentina", "away": "Brazil",
+        "league": "WC"}

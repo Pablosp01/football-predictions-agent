@@ -199,13 +199,40 @@ def test_today_lists_nations_league_matches(client):
     assert body["date"] == "2026-11-16"
     assert len(body["groups"]) == 1
     group = body["groups"][0]
+    assert group["league"] == "NL"
     assert group["label"] == "UEFA Nations League"
     assert len(group["fixtures"]) == 2  # finished match excluded
     fx = group["fixtures"][0]
     assert fx["home_team"] == "Iceland" and fx["away_team"] == "Luxembourg"
     assert fx["prediction"] is not None
     assert fx["prediction"]["match_pick"] is not None
-    assert fx["prediction"]["league"] == "WC"
+    assert fx["prediction"]["league"] == "NL"
+
+
+def test_fixtures_nations_league(client):
+    """The Nations League is a real league in /fixtures, not an error."""
+    from football_agent.data.providers import clear_espn_cache
+    clear_espn_cache()
+    with patch("football_agent.data.providers.requests.get",
+               side_effect=_fake_espn_get):
+        r = client.get("/fixtures", params={"league": "NL", "date": "2026-11-16"})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["league"] == "NL"
+    assert len(body["fixtures"]) == 2
+    assert body["fixtures"][0]["home_team"] == "Iceland"
+    assert body["fixtures"][0]["prediction"] is not None
+
+
+def test_ratings_and_team_nations_league(client):
+    r = client.get("/ratings", params={"league": "NL"})
+    assert r.status_code == 200, r.text
+    teams = [row["team"] for row in r.json()["ratings"]]
+    assert "Iceland" in teams and "Germany" in teams
+    r = client.get("/team", params={"team": "Iceland", "league": "NL"})
+    assert r.status_code == 200, r.text
+    assert r.json()["team"] == "Iceland"
+    assert r.json()["league"] == "NL"
 
 
 def test_today_no_matches_message(client):

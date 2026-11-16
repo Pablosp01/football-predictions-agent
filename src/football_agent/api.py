@@ -37,9 +37,11 @@ MODEL_NAME = "Elo + Dixon-Coles Poisson"
 # are logged (status, content type, body length and a short head) —
 # never an API key, and never a full body.
 logger = logging.getLogger("football_agent.api")
-# Every football-data.org free-tier (TIER_ONE) competition.
+# Every football-data.org free-tier (TIER_ONE) competition, plus the
+# UEFA Nations League (NL) — not on football-data.org, it uses the
+# international sample pool and ESPN fixtures instead.
 LEAGUES = ["PL", "PD", "SA", "BL1", "FL1", "ELC", "DED", "PPL", "BSA",
-           "CL", "WC", "EC"]
+           "CL", "WC", "EC", "NL"]
 DISCLAIMER = (
     "Statistical model output, not betting advice. No guarantee of profit; "
     "probabilities are estimates and football is noisy."
@@ -103,7 +105,8 @@ def _require_known_league(league: str) -> str:
             "error": f"Unknown league: '{league}'",
             "known_leagues": LEAGUES,
             "hint": ("Supported competitions are the football-data.org free tier: "
-                     "PL, PD, SA, BL1, FL1, ELC, DED, PPL, BSA, CL, WC, EC."),
+                     "PL, PD, SA, BL1, FL1, ELC, DED, PPL, BSA, CL, WC, EC, "
+                     "plus the UEFA Nations League (NL)."),
         })
     return code
 
@@ -171,7 +174,7 @@ def get_predictor(league: str) -> Predictor:
                 "matches_available": len(matches),
                 "hint": ("Set FOOTBALL_DATA_API_KEY for live data; the bundled sample "
                          "data only covers the Premier League (PL) and the "
-                         "international tournaments (WC, EC)."),
+                         "international tournaments (WC, EC, NL)."),
             })
         _matches_cache[league] = matches
         if league in INTERNATIONAL_LEAGUES:
@@ -395,6 +398,7 @@ _LEAGUE_NAMES = {
     "DED": "Eredivisie", "PPL": "Primeira Liga",
     "BSA": "Campeonato Brasileiro Série A", "CL": "Champions League",
     "WC": "FIFA World Cup", "EC": "European Championship",
+    "NL": "UEFA Nations League",
 }
 
 
@@ -1219,7 +1223,8 @@ def today(date: str | None = Query(default=None, examples=["2026-11-16"])) -> di
     matches the model can predict are listed: the other club leagues
     need FOOTBALL_DATA_API_KEY for history, so their fixtures are
     skipped here (ask for one league via /fixtures to see them
-    listed). Internationals are predicted with the WC pool.
+    listed). Internationals are predicted with the international
+    pool (NL).
     """
     on = None
     if date:
@@ -1243,13 +1248,13 @@ def today(date: str | None = Query(default=None, examples=["2026-11-16"])) -> di
                            "label": _LEAGUE_NAMES.get(league, league),
                            "fixtures": predicted})
     try:
-        intl = espn.intl_fixtures(on)
+        intl = espn.intl_fixtures(on, league="NL")
     except Exception:
         intl = []
-    predicted = [f for f in _predict_fixtures(intl, "WC")
+    predicted = [f for f in _predict_fixtures(intl, "NL")
                  if f["prediction"] is not None]
     if predicted:
-        groups.append({"league": "WC", "label": "UEFA Nations League",
+        groups.append({"league": "NL", "label": "UEFA Nations League",
                        "fixtures": predicted})
     if not groups:
         return {"date": on.isoformat(), "groups": [],

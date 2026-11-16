@@ -1,5 +1,5 @@
-"""League coverage tests: all 12 free-tier competitions, plus the
-separate international (WC/EC) rating pool.
+"""League coverage tests: all 13 competitions (12 free-tier + Nations
+League), plus the separate international (WC/EC/NL) rating pool.
 
 Runs against the bundled offline sample data (FOOTBALL_DATA_API_KEY empty).
 """
@@ -27,25 +27,28 @@ def client():
 
 
 def test_every_free_tier_competition_resolves():
-    """All 12 free-tier codes are listed, named, and have a provider."""
-    assert len(api.LEAGUES) == 12
-    assert set(api.LEAGUES) == set(FREE_TIER_COMPETITIONS)
+    """All 12 free-tier codes are listed, named, and have a provider;
+    the Nations League (NL) is a 13th code on the international pool."""
+    assert len(api.LEAGUES) == 13
+    assert set(api.LEAGUES) == set(FREE_TIER_COMPETITIONS) | {"NL"}
     for code, name in FREE_TIER_COMPETITIONS.items():
         assert api._LEAGUE_NAMES[code] == name
         provider = get_provider(code)
         assert provider is not None
+    assert api._LEAGUE_NAMES["NL"] == "UEFA Nations League"
     # Internationals get their own provider; clubs get the sample one.
     assert isinstance(get_provider("WC"), InternationalSampleProvider)
     assert isinstance(get_provider("EC"), InternationalSampleProvider)
+    assert isinstance(get_provider("NL"), InternationalSampleProvider)
     assert isinstance(get_provider("PL"), SampleProvider)
     assert isinstance(get_provider("PD"), SampleProvider)
 
 
-def test_health_lists_all_twelve(client):
+def test_health_lists_all_thirteen(client):
     r = client.get("/health")
     assert r.status_code == 200
     assert r.json()["leagues"] == api.LEAGUES
-    assert len(r.json()["leagues"]) == 12
+    assert len(r.json()["leagues"]) == 13
 
 
 def test_international_sample_loads():
@@ -64,6 +67,9 @@ def test_international_sample_loads():
     assert len(ec_matches) == len(matches)
     assert {(m.date, m.home_team, m.away_team) for m in ec_matches} == \
         {(m.date, m.home_team, m.away_team) for m in matches}
+    # NL is the same pool too.
+    nl_matches = provider.matches("NL")
+    assert len(nl_matches) == len(matches)
     assert provider.fixtures("WC") == []
 
 
@@ -71,14 +77,16 @@ def test_wc_prediction_uses_international_pool():
     api.clear_cache()
     wc = api.get_predictor("WC")
     ec = api.get_predictor("EC")
+    nl = api.get_predictor("NL")
     assert "Argentina" in wc.elo.ratings
     assert "Brazil" in wc.elo.ratings
     assert "Arsenal" not in wc.elo.ratings  # no club Elo in the pool
     assert "Arsenal" not in wc.dc.strengths
-    # WC and EC are the same pool: identical ratings.
-    assert wc.elo.ratings == ec.elo.ratings
+    # WC, EC and NL are the same pool: identical ratings.
+    assert wc.elo.ratings == ec.elo.ratings == nl.elo.ratings
     # Neutral venues: no Elo home edge for internationals.
     assert wc.elo.home_advantage == 0.0
+    assert nl.elo.home_advantage == 0.0
     pred = wc.predict("Argentina", "Brazil")
     total = pred.p_home + pred.p_draw + pred.p_away
     assert total == pytest.approx(1.0, abs=0.01)
@@ -113,6 +121,21 @@ def test_predict_usa_alias_resolves_to_united_states(client):
                                       "away_team": "Mexico", "league": "WC"})
     assert r.status_code == 200, r.text
     assert r.json()["home_team"] == "United States"
+
+
+def test_predict_nations_league_via_api(client):
+    """Iceland vs Luxembourg as a Nations League match, not a club one."""
+    r = client.post("/predict", json={"home_team": "Iceland",
+                                      "away_team": "Luxembourg", "league": "NL"})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["home_team"] == "Iceland" and body["away_team"] == "Luxembourg"
+    assert body["league"] == "NL"
+    total = body["p_home"] + body["p_draw"] + body["p_away"]
+    assert total == pytest.approx(1.0, abs=0.01)
+    assert body["match_pick"]["outcome"] == "home"
+    assert body["p_home"] > 0.9  # the pool runs hot on thin data
+    assert body["totals"] and body["top_pick"]
 
 
 def test_predict_euros_uses_international_pool(client):
@@ -156,9 +179,11 @@ def test_page_dropdown_lists_all_competitions(client):
     assert 'optgroup label="Club leagues"' in html
     assert 'optgroup label="International tournaments"' in html
     for code in ("PL", "PD", "SA", "BL1", "FL1", "ELC", "DED", "PPL",
-                 "BSA", "CL", "WC", "EC"):
+                 "BSA", "CL", "WC", "EC", "NL"):
         assert f'value="{code}"' in html
-    assert "World Cup and Euros work without a data key" in html
+    assert "Nations League, World Cup and Euros work without a data key" in html
     assert "Only the Premier League works without a data key" not in html
     assert 'data-league="WC"' in html
+    assert 'data-league="NL"' in html
     assert "Argentina vs Brazil" in html
+    assert "Iceland vs Luxembourg" in html

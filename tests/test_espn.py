@@ -106,6 +106,16 @@ def test_espn_fixtures_without_date_scans_ten_days():
     assert fixtures[0].away_team == "Newcastle United"
 
 
+def test_espn_nations_league_fixtures():
+    clear_espn_cache()
+    with patch("football_agent.data.providers.requests.get",
+               side_effect=_fake_get):
+        fixtures = EspnProvider().fixtures("NL", date(2026, 11, 16))
+    assert len(fixtures) == 2
+    assert fixtures[0].home_team == "Iceland"
+    assert fixtures[0].league == "NL"
+
+
 def test_espn_unknown_league_returns_empty():
     clear_espn_cache()
     with patch("football_agent.data.providers.requests.get",

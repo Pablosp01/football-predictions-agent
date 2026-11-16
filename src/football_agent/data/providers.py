@@ -40,8 +40,10 @@ FREE_TIER_COMPETITIONS = {
 
 # International tournaments: national teams only. They share one rating
 # pool (the bundled international sample) and are never mixed with
-# club-team Elo.
-INTERNATIONAL_LEAGUES = {"WC", "EC"}
+# club-team Elo. NL is the UEFA Nations League — it is not a
+# football-data.org competition, so it has no live history source;
+# the sample pool and ESPN fixtures are its only data.
+INTERNATIONAL_LEAGUES = {"WC", "EC", "NL"}
 
 DEFAULT_SAMPLE = Path(__file__).resolve().parents[3] / "data" / "sample" / "pl_matches.csv"
 DEFAULT_INTERNATIONAL_SAMPLE = (Path(__file__).resolve().parents[3]
@@ -269,6 +271,17 @@ class EspnProvider:
 
     def fixtures(self, league: str = "PL",
                  on: date | None = None) -> list[Match]:
+        if league == "NL":
+            # The Nations League is an international competition, so
+            # its fixtures come from the intl feed, not a club slug.
+            if on is not None:
+                return self.intl_fixtures(on, league="NL")
+            out: list[Match] = []
+            today = date.today()
+            for i in range(10):
+                out.extend(self.intl_fixtures(
+                    today + timedelta(days=i), league="NL"))
+            return sorted(out, key=lambda m: m.date)
         slug = ESPN_LEAGUE_SLUGS.get(league)
         if slug is None:
             return []
@@ -284,11 +297,11 @@ class EspnProvider:
         # Stable by date: within a day the kickoff order is kept.
         return sorted(out, key=lambda m: m.date)
 
-    def intl_fixtures(self, on: date) -> list[Match]:
+    def intl_fixtures(self, on: date, league: str = "WC") -> list[Match]:
         """International matches on a day (UEFA Nations League)."""
         out: list[Match] = []
         for slug in ESPN_INTL_SLUGS:
-            out.extend(_espn_day(slug, on, "WC"))
+            out.extend(_espn_day(slug, on, league))
         return sorted(out, key=lambda m: m.date)
 
 
@@ -296,8 +309,12 @@ def get_provider(league: str = "PL") -> Provider:
     """Prefer the live API when a key is set, else the bundled sample data.
 
     WC/EC use the international sample pool (national teams only);
-    club leagues use the Premier League sample file.
+    club leagues use the Premier League sample file. NL (Nations
+    League) always uses the international sample pool: it is not a
+    football-data.org competition, so no key can fetch its history.
     """
+    if league == "NL":
+        return InternationalSampleProvider()
     if os.environ.get("FOOTBALL_DATA_API_KEY"):
         try:
             return FootballDataOrgProvider()
