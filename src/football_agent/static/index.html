@@ -1185,23 +1185,40 @@ function parseChatMessage(text, pendingTeam, defaultLeague) {
     var dayName = (when === "tomorrow" ? "Tomorrow" : "Today") +
       " (" + chatDayLabel(off) + ")";
     if (!leagueNamed) {
-      // What matches are actually on today, across the competitions:
-      // the /today endpoint lists the real fixtures (ESPN) with the
-      // model's pick for each. On an international-break Monday that
-      // is the Nations League, not an empty Premier League day.
+      // What matches are actually on today, across every league:
+      // the /today endpoint searches all competitions (ESPN) and
+      // gives the model's pick for each match it can predict. On an
+      // international-break Monday that is the Nations League, not
+      // an empty Premier League day. Leagues with matches but no
+      // prediction data yet are listed separately, not hidden.
       chatGet("/today?date=" + chatIsoDate(off),
               "Checking " + (when === "tomorrow" ? "tomorrow" : "today") + "’s matches…")
         .then(function (body) {
           if (!body) return;
-          if (!body.groups || !body.groups.length) {
+          var dayWord = when === "tomorrow" ? "tomorrow" : "today";
+          var hasGroups = body.groups && body.groups.length;
+          var hasUnav = body.unavailable && body.unavailable.length;
+          if (!hasGroups && !hasUnav) {
             addChatMsg("agent", "<b>" + esc(dayName) + " — no matches.</b><br>" +
               esc(body.message || "No matches on that date."));
             return;
           }
-          body.groups.forEach(function (g) {
-            renderQuickList(g.label + " — " + dayName + " (" + g.fixtures.length +
-              (g.fixtures.length === 1 ? " match)" : " matches)"), g.fixtures);
-          });
+          if (hasGroups) {
+            body.groups.forEach(function (g) {
+              renderQuickList(g.label + " — " + dayName + " (" + g.fixtures.length +
+                (g.fixtures.length === 1 ? " match)" : " matches)"), g.fixtures);
+            });
+          }
+          if (hasUnav) {
+            var lines = body.unavailable.map(function (u) {
+              return esc(u.label) + " — " + u.fixtures +
+                (u.fixtures === 1 ? " match " : " matches ") + dayWord +
+                ", but the model has no history for this league yet.";
+            }).join("<br>");
+            addChatMsg("agent", "<b>Also on " + dayWord +
+              ", not predicted yet:</b><br>" + lines +
+              "<br>Those leagues need match history before the model can predict them.");
+          }
         });
       return;
     }

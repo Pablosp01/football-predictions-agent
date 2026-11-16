@@ -47,8 +47,23 @@ _ESPN_NATIONS_DAY = {"events": [
 
 
 def _fake_espn_get(url, timeout=None):
-    if "uefa.nations" in url:
+    # Date-gated: each feed answers only on its day, so /today on a
+    # different date sees nothing from it.
+    if "uefa.nations" in url and "dates=20261116" in url:
         return _FakeEspnResponse(_ESPN_NATIONS_DAY)
+    if "ned.1" in url and "dates=20261116" in url:
+        return _FakeEspnResponse({"events": [
+            _espn_event("2026-11-16T19:45Z", "pre", "Ajax", "PSV"),
+        ]})
+    if "eng.2" in url and "dates=20261116" in url:
+        return _FakeEspnResponse({"events": [
+            _espn_event("2026-11-16T19:45Z", "pre", "Leeds United",
+                        "Norwich City"),
+        ]})
+    if "fifa.world" in url and "dates=20260719" in url:
+        return _FakeEspnResponse({"events": [
+            _espn_event("2026-07-19T19:00Z", "pre", "Brazil", "Argentina"),
+        ]})
     return _FakeEspnResponse({"events": []})
 
 
@@ -235,6 +250,59 @@ def test_ratings_and_team_nations_league(client):
     assert r.json()["league"] == "NL"
 
 
+def test_today_searches_all_leagues(client):
+    """Today's prediction searches every league, not just the top
+    ones: on Mon 16 Nov 2026 the Eredivisie and Championship also
+    have a match. They have no prediction data yet (no key), so they
+    are listed as unavailable instead of silently dropped."""
+    from football_agent.data.providers import clear_espn_cache
+    clear_espn_cache()
+    with patch("football_agent.data.providers.requests.get",
+               side_effect=_fake_espn_get):
+        r = client.get("/today", params={"date": "2026-11-16"})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert [g["league"] for g in body["groups"]] == ["NL"]
+    assert [u["league"] for u in body["unavailable"]] == ["ELC", "DED"]
+    assert body["unavailable"][0] == {
+        "league": "ELC", "label": "Championship", "fixtures": 1}
+    assert body["unavailable"][1] == {
+        "league": "DED", "label": "Eredivisie", "fixtures": 1}
+
+
+def test_today_includes_world_cup(client):
+    """A World Cup match day is searched too, and predicted with the
+    international pool."""
+    from football_agent.data.providers import clear_espn_cache
+    clear_espn_cache()
+    with patch("football_agent.data.providers.requests.get",
+               side_effect=_fake_espn_get):
+        r = client.get("/today", params={"date": "2026-07-19"})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert [g["league"] for g in body["groups"]] == ["WC"]
+    assert body["unavailable"] == []
+    fx = body["groups"][0]["fixtures"][0]
+    assert fx["home_team"] == "Brazil" and fx["away_team"] == "Argentina"
+    assert fx["prediction"] is not None
+
+
+def test_fixtures_world_cup(client):
+    """The World Cup is a real league in /fixtures, via its own ESPN
+    feed — not an error, and not Nations League matches."""
+    from football_agent.data.providers import clear_espn_cache
+    clear_espn_cache()
+    with patch("football_agent.data.providers.requests.get",
+               side_effect=_fake_espn_get):
+        r = client.get("/fixtures", params={"league": "WC", "date": "2026-07-19"})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["league"] == "WC"
+    assert len(body["fixtures"]) == 1
+    assert body["fixtures"][0]["home_team"] == "Brazil"
+    assert body["fixtures"][0]["prediction"] is not None
+
+
 def test_today_no_matches_message(client):
     from football_agent.data.providers import clear_espn_cache
     clear_espn_cache()
@@ -244,6 +312,7 @@ def test_today_no_matches_message(client):
     assert r.status_code == 200, r.text
     body = r.json()
     assert body["groups"] == []
+    assert body["unavailable"] == []
     assert body["message"].startswith("No matches on 2026-11-16")
 
 

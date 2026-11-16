@@ -29,7 +29,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
 from .backtest import walk_forward
-from .data.providers import INTERNATIONAL_LEAGUES, EspnProvider, get_provider
+from .data.providers import (ESPN_LEAGUE_SLUGS, INTERNATIONAL_LEAGUES,
+                             EspnProvider, get_provider)
 from .model.predict import Predictor
 
 MODEL_NAME = "Elo + Dixon-Coles Poisson"
@@ -1260,13 +1261,15 @@ def today(date: str | None = Query(default=None, examples=["2026-11-16"])) -> di
     """What matches are actually on today (or a given day), with
     the model's prediction for each.
 
-    Club leagues (PL, PD, SA, BL1, FL1, CL) and the UEFA Nations
-    League, from ESPN's free scoreboard — no key needed. Only
-    matches the model can predict are listed: the other club leagues
-    need FOOTBALL_DATA_API_KEY for history, so their fixtures are
-    skipped here (ask for one league via /fixtures to see them
-    listed). Internationals are predicted with the international
-    pool (NL).
+    Every league the site knows is searched, on ESPN's free
+    scoreboard — no key needed: all ten club leagues (Premier League,
+    La Liga, Serie A, Bundesliga, Ligue 1, Championship, Eredivisie,
+    Primeira Liga, Brasileirão, Champions League) plus the World Cup,
+    the Euros and the Nations League. Leagues with matches that day
+    but no prediction are listed under "unavailable": the model has
+    no history for them yet, so they need FOOTBALL_DATA_API_KEY for
+    live history before it can predict them. Internationals are
+    predicted with the international pool (WC/EC/NL).
     """
     on = None
     if date:
@@ -1278,10 +1281,13 @@ def today(date: str | None = Query(default=None, examples=["2026-11-16"])) -> di
     on = on or _date.today()
     espn = EspnProvider()
     groups: list[dict] = []
-    for league in ("PL", "PD", "SA", "BL1", "FL1", "CL"):
+    unavailable: list[dict] = []
+    for league in (*ESPN_LEAGUE_SLUGS, "WC", "EC", "NL"):
         try:
             fixtures = espn.fixtures(league, on)
         except Exception:
+            continue
+        if not fixtures:
             continue
         predicted = [f for f in _predict_fixtures(fixtures, league)
                      if f["prediction"] is not None]
@@ -1289,22 +1295,23 @@ def today(date: str | None = Query(default=None, examples=["2026-11-16"])) -> di
             groups.append({"league": league,
                            "label": _LEAGUE_NAMES.get(league, league),
                            "fixtures": predicted})
-    try:
-        intl = espn.intl_fixtures(on, league="NL")
-    except Exception:
-        intl = []
-    predicted = [f for f in _predict_fixtures(intl, "NL")
-                 if f["prediction"] is not None]
-    if predicted:
-        groups.append({"league": "NL", "label": "UEFA Nations League",
-                       "fixtures": predicted})
-    if not groups:
-        return {"date": on.isoformat(), "groups": [],
-                "message": (f"No matches on {on.isoformat()} in the covered "
-                            "competitions (Premier League, La Liga, Serie A, "
-                            "Bundesliga, Ligue 1, Champions League, Nations League)."),
+        else:
+            # Fixtures exist, but the model cannot predict this
+            # league yet — say so instead of silently dropping it.
+            unavailable.append({"league": league,
+                                "label": _LEAGUE_NAMES.get(league, league),
+                                "fixtures": len(fixtures)})
+    if not groups and not unavailable:
+        return {"date": on.isoformat(), "groups": [], "unavailable": [],
+                "message": (f"No matches on {on.isoformat()} in any of the "
+                            "covered competitions (Premier League, La Liga, "
+                            "Serie A, Bundesliga, Ligue 1, Championship, "
+                            "Eredivisie, Primeira Liga, Brasileirão, "
+                            "Champions League, World Cup, Euros, Nations "
+                            "League)."),
                 "source": "espn"}
-    return {"date": on.isoformat(), "groups": groups, "source": "espn"}
+    return {"date": on.isoformat(), "groups": groups,
+            "unavailable": unavailable, "source": "espn"}
 
 
 @app.get("/backtest", dependencies=[Depends(require_api_key)])

@@ -54,10 +54,10 @@ def test_espn_day_returns_only_scheduled_fixtures():
     clear_espn_cache()
     with patch("football_agent.data.providers.requests.get",
                side_effect=_fake_get):
-        intl = EspnProvider().intl_fixtures(date(2026, 11, 16))
+        intl = EspnProvider().intl_fixtures(date(2026, 11, 16), league="NL")
     assert len(intl) == 2  # the finished match is not a fixture
     assert intl[0] == Match(date=date(2026, 11, 16), season="",
-                            league="WC", home_team="Iceland",
+                            league="NL", home_team="Iceland",
                             away_team="Luxembourg")
     assert intl[1].home_team == "Germany"
     assert intl[1].away_team == "Netherlands"
@@ -74,8 +74,8 @@ def test_espn_day_is_cached():
 
     with patch("football_agent.data.providers.requests.get",
                side_effect=counting):
-        EspnProvider().intl_fixtures(date(2026, 11, 16))
-        EspnProvider().intl_fixtures(date(2026, 11, 16))
+        EspnProvider().intl_fixtures(date(2026, 11, 16), league="NL")
+        EspnProvider().intl_fixtures(date(2026, 11, 16), league="NL")
     assert calls["n"] == 1
 
 
@@ -116,7 +116,7 @@ def test_espn_nations_league_fixtures():
     assert fixtures[0].league == "NL"
 
 
-def test_espn_unknown_league_returns_empty():
+def test_espn_world_cup_returns_empty_when_no_matches():
     clear_espn_cache()
     with patch("football_agent.data.providers.requests.get",
                side_effect=_fake_get):

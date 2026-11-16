@@ -209,10 +209,14 @@ class FootballDataOrgProvider:
 # the API's resolve_team() maps them to the model's canonical names.
 ESPN_LEAGUE_SLUGS = {
     "PL": "eng.1", "PD": "esp.1", "SA": "ita.1", "BL1": "ger.1",
-    "FL1": "fra.1", "DED": "ned.1", "PPL": "por.1", "BSA": "bra.1",
-    "CL": "uefa.champions",
+    "FL1": "fra.1", "ELC": "eng.2", "DED": "ned.1", "PPL": "por.1",
+    "BSA": "bra.1", "CL": "uefa.champions",
 }
-ESPN_INTL_SLUGS = ("uefa.nations",)
+ESPN_INTL_SLUGS = {
+    "NL": ("uefa.nations",),
+    "WC": ("fifa.world",),
+    "EC": ("uefa.euro",),
+}
 ESPN_CACHE_TTL = timedelta(minutes=30)
 _espn_cache: dict[str, tuple[datetime, list[Match]]] = {}
 
@@ -271,16 +275,17 @@ class EspnProvider:
 
     def fixtures(self, league: str = "PL",
                  on: date | None = None) -> list[Match]:
-        if league == "NL":
-            # The Nations League is an international competition, so
-            # its fixtures come from the intl feed, not a club slug.
+        if league in INTERNATIONAL_LEAGUES:
+            # International tournaments come from the intl feed, not a
+            # club slug — each has its own ESPN feed (Nations League,
+            # World Cup, Euros).
             if on is not None:
-                return self.intl_fixtures(on, league="NL")
+                return self.intl_fixtures(on, league=league)
             out: list[Match] = []
             today = date.today()
             for i in range(10):
                 out.extend(self.intl_fixtures(
-                    today + timedelta(days=i), league="NL"))
+                    today + timedelta(days=i), league=league))
             return sorted(out, key=lambda m: m.date)
         slug = ESPN_LEAGUE_SLUGS.get(league)
         if slug is None:
@@ -298,9 +303,10 @@ class EspnProvider:
         return sorted(out, key=lambda m: m.date)
 
     def intl_fixtures(self, on: date, league: str = "WC") -> list[Match]:
-        """International matches on a day (UEFA Nations League)."""
+        """International matches on a day (Nations League / World Cup /
+        Euros — each league has its own ESPN feed)."""
         out: list[Match] = []
-        for slug in ESPN_INTL_SLUGS:
+        for slug in ESPN_INTL_SLUGS.get(league, ()):
             out.extend(_espn_day(slug, on, league))
         return sorted(out, key=lambda m: m.date)
 
