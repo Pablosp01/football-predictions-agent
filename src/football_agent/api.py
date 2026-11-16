@@ -987,9 +987,116 @@ def predict_batch(req: BatchRequest) -> dict:
             "disclaimer": DISCLAIMER}
 
 
+@app.get("/ratings", dependencies=[Depends(require_api_key)])
+def ratings(league: str = "PL") -> dict:
+    """Elo table for a league, strongest first.
+
+    The model's answer to "who is the best team / who will win the
+    league": the highest Elo rating. Ratings come from the fitted
+    history, so data_as_of is the last match date in that history.
+    """
+    league = _require_known_league(league)
+    predictor = get_predictor(league)
+    rows = sorted(
+        ({"team": t, "rating": round(predictor.elo.rating(t), 1)}
+         for t in _known_teams(league)),
+        key=lambda r: -r["rating"])
+    last = predictor.history[-1].date if predictor.history else None
+    return {"league": league, "ratings": rows,
+            "data_as_of": last.isoformat() if last else None,
+            "source": "model"}
+
+
+@app.get("/team", dependencies=[Depends(require_api_key)])
+def team_card(team: str, league: str = "PL") -> dict:
+    """A team's form card: Elo rating, last-5 results, goals.
+
+    Form is the last five played matches in the fitted history,
+    oldest first; recent is the same five, newest first.
+    data_as_of is the last match date in that history. Unknown teams
+    get the same 400 + did_you_mean as /predict.
+    """
+    league = _require_known_league(league)
+    canonical = resolve_team(team, league)
+    predictor = get_predictor(league)
+    played = [m for m in predictor.history
+              if m.home_team == canonical or m.away_team == canonical]
+    recent = sorted(played, key=lambda m: m.date)[-5:]
+    form, scored, conceded, results = [], 0, 0, []
+    for m in recent:
+        if m.home_team == canonical:
+            gf, ga, opponent = m.home_goals, m.away_goals, m.away_team
+        else:
+            gf, ga, opponent = m.away_goals, m.home_goals, m.home_team
+        gf, ga = gf or 0, ga or 0
+        scored += gf
+        conceded += ga
+        letter = "W" if gf > ga else "D" if gf == ga else "L"
+        form.append(letter)
+        results.append({"date": m.date.isoformat(), "opponent": opponent,
+                        "score": f"{gf}-{ga}",  # the team's goals first
+                        "result": letter,
+                        "home": m.home_team == canonical})
+    n = len(recent)
+    last = predictor.history[-1].date if predictor.history else None
+    return {"team": canonical, "league": league,
+            "rating": round(predictor.elo.rating(canonical), 1),
+            "form": form,
+            "points_per_game": round(sum(3 if f == "W" else 1 if f == "D" else 0
+                                         for f in form) / n, 2) if n else 0.0,
+            "goals_scored_per_game": round(scored / n, 2) if n else 0.0,
+            "goals_conceded_per_game": round(conceded / n, 2) if n else 0.0,
+            "recent": list(reversed(results)),
+            "data_as_of": last.isoformat() if last else None,
+            "source": "model"}
+
+
+@app.get("/head-to-head", dependencies=[Depends(require_api_key)])
+def head_to_head_endpoint(home_team: str, away_team: str,
+                          league: str = "PL") -> dict:
+    """Last five meetings between two teams, newest first."""
+    league = _require_known_league(league)
+    home = resolve_team(home_team, league)
+    away = resolve_team(away_team, league)
+    if home == away:
+        raise HTTPException(status_code=400, detail={
+            "error": "Home and away teams must be different."})
+    predictor = get_predictor(league)
+    pair = {home, away}
+    meetings = sorted(
+        (m for m in predictor.history
+         if {m.home_team, m.away_team} == pair),
+        key=lambda m: m.date, reverse=True)[:5]
+    hw = draws = aw = 0
+    out = []
+    for m in meetings:
+        hg, ag = m.home_goals or 0, m.away_goals or 0
+        if hg > ag:
+            winner = m.home_team
+        elif hg < ag:
+            winner = m.away_team
+        else:
+            winner = None
+        if winner == home:
+            hw += 1
+        elif winner == away:
+            aw += 1
+        else:
+            draws += 1
+        out.append({"date": m.date.isoformat(), "home_team": m.home_team,
+                    "away_team": m.away_team, "score": f"{hg}-{ag}"})
+    last = predictor.history[-1].date if predictor.history else None
+    return {"home_team": home, "away_team": away, "league": league,
+            "meetings": out, "home_wins": hw, "draws": draws,
+            "away_wins": aw,
+            "data_as_of": last.isoformat() if last else None,
+            "source": "model"}
+
+
 @app.get("/fixtures", dependencies=[Depends(require_api_key)])
 def fixtures(league: str = "PL",
-             date: str | None = Query(default=None, examples=["2026-11-15"])) -> dict:
+             date: str | None = Query(default=None, examples=["2026-11-15"]),
+             team: str | None = Query(default=None, examples=["Arsenal"])) -> dict:
     league = _require_known_league(league)
     on = None
     if date:
@@ -1000,6 +1107,13 @@ def fixtures(league: str = "PL",
                 "error": f"Invalid date '{date}': use YYYY-MM-DD"})
     provider = get_provider(league)
     days_fixtures = provider.fixtures(league, on)
+    if team:
+        # A team's fixtures only (e.g. its next match): unknown names
+        # get the same 400 + did_you_mean as /predict.
+        canonical = resolve_team(team, league)
+        days_fixtures = [fx for fx in days_fixtures
+                         if fx.home_team == canonical
+                         or fx.away_team == canonical]
     out: list[dict] = []
     predictor = None
     for fx in days_fixtures:

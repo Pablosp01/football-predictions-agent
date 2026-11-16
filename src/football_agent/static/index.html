@@ -148,13 +148,18 @@
       <button type="button" class="chip" data-chat="Arsenal vs Chelsea">Arsenal vs Chelsea</button>
       <button type="button" class="chip" data-chat="Who wins, Man Utd or Liverpool?">Who wins, Man Utd or Liverpool?</button>
       <button type="button" class="chip" data-chat="Argentina vs Brazil">Argentina vs Brazil</button>
+      <button type="button" class="chip" data-chat="Today's matches">Today's matches</button>
+      <button type="button" class="chip" data-chat="Arsenal's form">Arsenal's form</button>
+      <button type="button" class="chip" data-chat="Who will win the Premier League?">Who will win the Premier League?</button>
     </div>
     <form id="chatbot-form">
       <input id="chatbot-input" type="text" placeholder="Type two teams, e.g. Arsenal vs Chelsea" autocomplete="off">
       <button id="chatbot-send" type="submit">Send</button>
     </form>
     <p class="note">Type the way you would in a chat — nicknames work (“Man Utd”, “Spurs”).
-      The league follows the selection in the Predict tab.</p>
+      You can also ask for today’s or tomorrow’s matches, several matches at once,
+      a team’s form, head to head, or who will win the league.
+      The league follows the selection in the Predict tab, or name it in your message.</p>
   </section>
 </div>
 
@@ -417,6 +422,36 @@ var CHAT_FILLER = ["predict", "prediction", "who", "wins", "win", "will",
   "is", "are", "vs", "v", "versus", "against"];
 var CHAT_TAIL_FILLER = ["tomorrow", "today", "tonight", "please"];
 
+// League names a chat message can name ("today's La Liga matches").
+// A league named in the message wins over the Predict tab's dropdown.
+var CHAT_LEAGUES = [
+  ["PL", ["premier league", "epl", "prem"]],
+  ["PD", ["la liga", "spanish league"]],
+  ["SA", ["serie a", "italian league"]],
+  ["BL1", ["bundesliga", "german league"]],
+  ["FL1", ["ligue 1", "french league"]],
+  ["ELC", ["championship"]],
+  ["DED", ["eredivisie", "dutch league"]],
+  ["PPL", ["primeira liga", "portuguese league"]],
+  ["BSA", ["brasileirao", "brazilian league"]],
+  ["CL", ["champions league", "ucl"]],
+  ["WC", ["world cup"]],
+  ["EC", ["euros", "european championship", "euro"]]
+];
+
+function chatFindLeague(normed) {
+  var i, j;
+  for (i = 0; i < CHAT_LEAGUES.length; i++) {
+    var forms = CHAT_LEAGUES[i][1];
+    for (j = 0; j < forms.length; j++) {
+      if (new RegExp("\\b" + chatEscapeRe(forms[j]) + "\\b").test(normed)) {
+        return CHAT_LEAGUES[i][0];
+      }
+    }
+  }
+  return null;
+}
+
 function chatCleanSide(s) {
   var words = chatNorm(s).split(" ").filter(function (w) { return w; });
   while (words.length && CHAT_FILLER.indexOf(words[0]) !== -1) words.shift();
@@ -439,11 +474,17 @@ function chatSplitSides(normed) {
 }
 
 // Parse a free-text chat message. pendingTeam is the canonical name of
-// a team the user named in the previous message (or null). Returns one of:
+// a team the user named in the previous message (or null); defaultLeague
+// is the Predict tab's dropdown value. Returns one of:
 //   {kind: "greeting"} | {kind: "help"} | {kind: "need-teams"} |
 //   {kind: "pending", team} | {kind: "same-team", team} |
-//   {kind: "predict", home, away}
-function parseChatMessage(text, pendingTeam) {
+//   {kind: "predict", home, away, league} |
+//   {kind: "today", when, league} | {kind: "weekend", league} |
+//   {kind: "multi", pairs, league} | {kind: "form", team, league} |
+//   {kind: "ratings", league} | {kind: "h2h", home, away, league} |
+//   {kind: "next", team, league}
+// "league" is the league named in the message, else defaultLeague.
+function parseChatMessage(text, pendingTeam, defaultLeague) {
   var normed = chatNorm(text);
   var words = normed.split(" ").filter(function (w) { return w; });
   // Short greetings and help, not prediction attempts.
@@ -451,23 +492,87 @@ function parseChatMessage(text, pendingTeam) {
       /^(hi|hello|hey|yo|hiya|good morning|good afternoon|good evening)\b/.test(normed)) {
     return { kind: "greeting" };
   }
+  var league = chatFindLeague(normed) || defaultLeague || "PL";
   var teams = chatFindTeams(normed);
+  var hasMatchWords = /\b(match|matches|game|games|fixture|fixtures)\b/.test(normed);
+  // Head-to-head: two teams + "head to head" / "h2h".
+  if (teams.length >= 2 &&
+      /\b(head to head|head-to-head|h2h)\b/.test(normed)) {
+    return { kind: "h2h", home: teams[0], away: teams[1], league: league };
+  }
+  // Today's / tomorrow's matches (no team named — a named match is a
+  // single prediction, and "today" is stripped as a tail word there).
+  if (teams.length === 0 &&
+      (hasMatchWords || /\b(predict|prediction)\b/.test(normed)) &&
+      (/\btoday'?s\b/.test(normed) || /\btoday\b/.test(normed))) {
+    return { kind: "today", when: "today", league: league };
+  }
+  if (teams.length === 0 &&
+      (hasMatchWords || /\b(predict|prediction)\b/.test(normed)) &&
+      (/\btomorrow'?s\b/.test(normed) || /\btomorrow\b/.test(normed))) {
+    return { kind: "today", when: "tomorrow", league: league };
+  }
+  if (teams.length === 0 &&
+      (/\bwhat'?s on\b/.test(normed) || /\bwhat is on\b/.test(normed)) &&
+      (/\btoday\b/.test(normed) || /\btomorrow\b/.test(normed))) {
+    return { kind: "today",
+             when: /\btomorrow\b/.test(normed) ? "tomorrow" : "today",
+             league: league };
+  }
+  // This weekend: the fixtures feed is day-by-day, so point at today.
+  if (teams.length === 0 && /\bweekend\b/.test(normed)) {
+    return { kind: "weekend", league: league };
+  }
+  // Who will win the league / best team: no team named, the league is
+  // the question. (Two named teams + "win" is a match prediction.)
+  if (teams.length === 0 &&
+      (/\bwin the (league|title)\b/.test(normed) ||
+       /\bwho (will win|wins) the\b/.test(normed) ||
+       (/\b(best|strongest|top)\b/.test(normed) &&
+        /\bteam(s)?\b/.test(normed)))) {
+    return { kind: "ratings", league: league };
+  }
+  // One team + form words: "Arsenal form", "How is Arsenal doing?"
+  if (teams.length === 1 &&
+      (/\bform\b/.test(normed) ||
+       /\brecent (form|results)\b/.test(normed) ||
+       /\blast (five|5)\b/.test(normed) ||
+       /\bhow (are|is)\b/.test(normed))) {
+    return { kind: "form", team: teams[0], league: league };
+  }
+  // One team + next-match words: "Arsenal's next match",
+  // "When do Arsenal play next?"
+  if (teams.length === 1 &&
+      (/\bnext match\b/.test(normed) ||
+       /\bwhen (do|does|is)\b/.test(normed) ||
+       /\bplaying next\b/.test(normed))) {
+    return { kind: "next", team: teams[0], league: league };
+  }
+  // Several matches at once: four or more known teams, grouped in
+  // order of appearance, at most five matches per message.
+  if (teams.length >= 4) {
+    var pairs = [];
+    for (var i = 0; i + 1 < teams.length && pairs.length < 5; i += 2) {
+      pairs.push([teams[i], teams[i + 1]]);
+    }
+    return { kind: "multi", pairs: pairs, league: league };
+  }
   if (teams.length >= 2) {
-    return { kind: "predict", home: teams[0], away: teams[1] };
+    return { kind: "predict", home: teams[0], away: teams[1], league: league };
   }
   if (teams.length === 1) {
     if (pendingTeam && chatNorm(pendingTeam) === chatNorm(teams[0])) {
       return { kind: "same-team", team: teams[0] };
     }
     if (pendingTeam) {
-      return { kind: "predict", home: pendingTeam, away: teams[0] };
+      return { kind: "predict", home: pendingTeam, away: teams[0], league: league };
     }
     return { kind: "pending", team: teams[0] };
   }
   if (/\bhelp\b/.test(normed)) return { kind: "help" };
   var sides = chatSplitSides(normed);
   if (sides) {
-    return { kind: "predict", home: sides[0], away: sides[1] };
+    return { kind: "predict", home: sides[0], away: sides[1], league: league };
   }
   if (pendingTeam) {
     // A short message with a team pending is the second team, typed
@@ -478,7 +583,7 @@ function parseChatMessage(text, pendingTeam) {
     var cw = cleaned.split(" ").filter(function (w) { return w; });
     if (cleaned && cw.length <= 4 &&
         !cw.some(function (w) { return reject.indexOf(w) !== -1; })) {
-      return { kind: "predict", home: pendingTeam, away: cleaned };
+      return { kind: "predict", home: pendingTeam, away: cleaned, league: league };
     }
   }
   return { kind: "need-teams" };
@@ -849,11 +954,16 @@ function parseChatMessage(text, pendingTeam) {
   var CHAT_GREETING =
     "<b>Hi! 👋</b><br>Ask me about a match the way you would in a chat — " +
     "for example “Arsenal vs Chelsea” or “Who wins, Man Utd or Liverpool?” " +
-    "I’ll give you the model’s prediction in plain words.";
+    "You can also ask for <b>“today’s matches”</b>, several matches at once, " +
+    "a team’s form (“Arsenal’s form”), head to head, or who will win the league. " +
+    "I’ll give you the model’s answer in plain words.";
   var CHAT_HELP =
     "<b>Here’s how I work.</b><br>Type two team names, e.g. “Arsenal vs Chelsea”. " +
-    "Nicknames work (“Man Utd”, “Spurs”). You can also name one team and I’ll ask " +
-    "who they’re playing. The league follows the selection in the Predict tab.";
+    "Nicknames work (“Man Utd”, “Spurs”). You can name one team and I’ll ask " +
+    "who they’re playing. I also answer “today’s matches” and “tomorrow’s matches”, " +
+    "several matches in one message, a team’s form, head to head, who will win " +
+    "the league, and a team’s next match. The league follows the selection in the " +
+    "Predict tab, or name it in your message (“today’s La Liga matches”).";
 
   // Club teams (Premier League sample) — used only to tell a national
   // team from a club team for the league tip in chatPredictError.
@@ -966,13 +1076,253 @@ function parseChatMessage(text, pendingTeam) {
       .finally(function () { setChatBusy(false); });
   }
 
+  // Small GET helper for the chatbot's question endpoints (form,
+  // ratings, head-to-head, fixtures): shows a "thinking" status,
+  // disables the input while waiting, and turns a failed request
+  // into a plain error bubble. Returns the parsed JSON or null
+  // (already reported).
+  function chatGet(url, thinking) {
+    setChatBusy(true);
+    var status = addMsg("status", esc(thinking || "Let me check…"), chatLog);
+    return fetchWithTimeout(url, {}, 90000)
+      .then(function (resp) {
+        status.remove();
+        if (!resp.ok) {
+          return resp.json().catch(function () { return {}; }).then(function (body) {
+            var detail = body.detail || {};
+            var msg = (detail && detail.error) || "Something went wrong.";
+            addChatMsg("error", "<b>Couldn’t answer that.</b><br>" + esc(msg) +
+              (detail.hint ? "<br>" + esc(detail.hint) : ""));
+            return null;
+          });
+        }
+        return resp.json();
+      })
+      .catch(function () {
+        status.remove();
+        addChatMsg("error", "<b>The model didn’t answer in time.</b><br>" +
+          "The free service may still be waking up — please wait a few seconds and try again.");
+        return null;
+      })
+      .finally(function () { setChatBusy(false); });
+  }
+
+  function chatIsoDate(offsetDays) {
+    var d = new Date();
+    d.setDate(d.getDate() + (offsetDays || 0));
+    function p(n) { return String(n).padStart(2, "0"); }
+    return d.getFullYear() + "-" + p(d.getMonth() + 1) + "-" + p(d.getDate());
+  }
+  function chatDayLabel(offsetDays) {
+    var d = new Date();
+    d.setDate(d.getDate() + (offsetDays || 0));
+    return d.toLocaleDateString("en-GB", { weekday: "long", day: "numeric", month: "short" });
+  }
+
+  // Compact pick list for several matches (today's fixtures, or several
+  // matches in one message): one row per match — the pick in words and
+  // its confidence. Tap a row for the full prediction.
+  function renderQuickList(title, items) {
+    var div = addChatMsg("agent", "<h3>" + esc(title) + "</h3>" +
+      '<div class="sub">Tap a match for the full prediction.</div>');
+    var ul = document.createElement("ul");
+    ul.className = "scores";
+    items.forEach(function (item) {
+      var d = item.prediction || item;
+      var pick = d.match_pick
+        ? (d.match_pick.outcome === "home" ? d.home_team + " win"
+           : d.match_pick.outcome === "away" ? d.away_team + " win" : "Draw")
+        : "—";
+      var p = d.match_pick ? d.match_pick.probability : d.confidence;
+      var li = document.createElement("li");
+      li.style.cursor = "pointer";
+      li.innerHTML = "<span>" + esc(d.home_team) + " vs " + esc(d.away_team) + "</span>" +
+        "<span>Pick: <b>" + esc(pick) + "</b> (" + pct(p) + ")</span>";
+      li.addEventListener("click", function () {
+        addChatMsg("agent", renderPrediction(d));
+      });
+      ul.appendChild(li);
+    });
+    div.appendChild(ul);
+    var disc = document.createElement("div");
+    disc.className = "disclaimer";
+    disc.textContent = "Statistical model output, not betting advice.";
+    div.appendChild(disc);
+    return div;
+  }
+
+  function chatToday(when, league) {
+    var off = when === "tomorrow" ? 1 : 0;
+    var label = (when === "tomorrow" ? "Tomorrow" : "Today") +
+      " (" + chatDayLabel(off) + ") — " + league;
+    chatGet("/fixtures?league=" + encodeURIComponent(league) +
+            "&date=" + chatIsoDate(off),
+            "Checking " + (when === "tomorrow" ? "tomorrow" : "today") + "’s fixtures…")
+      .then(function (body) {
+        if (!body) return;
+        if (!body.fixtures || !body.fixtures.length) {
+          addChatMsg("agent", "<b>" + esc(label) + " — no matches in the data.</b><br>" +
+            esc(body.message || "No fixtures on that date.") +
+            "<br>Name any two teams and I’ll predict that match instead.");
+          return;
+        }
+        renderQuickList(label + " (" + body.fixtures.length +
+          (body.fixtures.length === 1 ? " match)" : " matches)"), body.fixtures);
+      });
+  }
+
+  // Several matches in one message: one /predict-batch call, then the
+  // compact list. Errors name the team the model could not resolve.
+  function chatMulti(pairs, league) {
+    setChatBusy(true);
+    var status = addMsg("status", "Predicting " + pairs.length + " matches…", chatLog);
+    fetchWithTimeout("/health", {}, 90000)
+      .catch(function () { return null; }) // health is best-effort; predict may still work
+      .then(function () {
+        status.textContent = "Model is awake — predicting…";
+        return fetchWithTimeout("/predict-batch", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            fixtures: pairs.map(function (pr) {
+              return { home_team: pr[0], away_team: pr[1] };
+            }),
+            league: league
+          })
+        }, 120000);
+      })
+      .then(function (resp) {
+        status.remove();
+        if (resp.ok) return resp.json().then(function (body) {
+          renderQuickList("Your matches — " + league, body.predictions);
+        });
+        return resp.json().catch(function () { return {}; }).then(function (body) {
+          chatPredictError(pairs[0][0], pairs[0][1], body.detail || body);
+        });
+      })
+      .catch(function (err) {
+        status.remove();
+        addChatMsg("error",
+          "<b>The model didn’t answer in time.</b><br>" +
+          "The free service may still be waking up — please wait a few seconds and try again. " +
+          "(" + esc(err && err.name === "AbortError" ? "request timed out" : (err && err.message) || "network error") + ")");
+      })
+      .finally(function () { setChatBusy(false); });
+  }
+
+  function chatForm(team, league) {
+    chatGet("/team?team=" + encodeURIComponent(team) +
+            "&league=" + encodeURIComponent(league),
+            "Checking " + team + "’s form…")
+      .then(function (d) {
+        if (!d) return;
+        var letters = d.form.length ? d.form.join(" ") : "—";
+        var recent = (d.recent || []).map(function (r) {
+          return "<li><span>" + esc(r.date) + " — " + (r.home ? "vs " : "at ") +
+            esc(r.opponent) + "</span><span>" + esc(r.score) + " (" +
+            esc(r.result) + ")</span></li>";
+        }).join("");
+        addChatMsg("agent", "<h3>" + esc(d.team) + " — form</h3>" +
+          '<div class="sub">' + esc(d.league) + " · Elo rating <b>" +
+          esc(String(d.rating)) + "</b></div>" +
+          '<div class="facts">Last 5: <b>' + esc(letters) + "</b> · " +
+          esc(String(d.points_per_game)) + " pts/game · " +
+          esc(String(d.goals_scored_per_game)) + " scored / " +
+          esc(String(d.goals_conceded_per_game)) + " conceded per game</div>" +
+          (recent ? '<ul class="scores">' + recent + "</ul>" : "") +
+          '<div class="disclaimer">From the model’s data, to ' +
+          esc(d.data_as_of || "—") + ".</div>");
+      });
+  }
+
+  function chatRatings(league) {
+    chatGet("/ratings?league=" + encodeURIComponent(league),
+            "Checking the ratings…")
+      .then(function (d) {
+        if (!d) return;
+        var top = d.ratings.slice(0, 5);
+        var rows = top.map(function (r, i) {
+          return "<li><span>" + (i + 1) + ". " + esc(r.team) + "</span><span>" +
+            esc(String(r.rating)) + "</span></li>";
+        }).join("");
+        var fav = d.ratings[0];
+        addChatMsg("agent", "<h3>Strongest teams — " + esc(d.league) + "</h3>" +
+          "<p>By Elo rating, the model’s favourite is <b>" + esc(fav.team) +
+          "</b> (" + esc(String(fav.rating)) + ").</p>" +
+          '<ul class="scores">' + rows + "</ul>" +
+          '<div class="disclaimer">Ratings from the model’s data, to ' +
+          esc(d.data_as_of || "—") + ". A favourite is not a guarantee.</div>");
+      });
+  }
+
+  function chatH2H(home, away, league) {
+    chatGet("/head-to-head?home_team=" + encodeURIComponent(home) +
+            "&away_team=" + encodeURIComponent(away) +
+            "&league=" + encodeURIComponent(league),
+            "Checking their meetings…")
+      .then(function (d) {
+        if (!d) return;
+        var tally = d.home_wins + " win" + (d.home_wins === 1 ? "" : "s") +
+          " for " + d.home_team + ", " + d.draws +
+          " draw" + (d.draws === 1 ? "" : "s") + ", " + d.away_wins +
+          " win" + (d.away_wins === 1 ? "" : "s") + " for " + d.away_team;
+        var rows = d.meetings.map(function (m) {
+          return "<li><span>" + esc(m.date) + " — " + esc(m.home_team) +
+            " vs " + esc(m.away_team) + "</span><span>" + esc(m.score) + "</span></li>";
+        }).join("");
+        addChatMsg("agent", "<h3>" + esc(d.home_team) + " vs " + esc(d.away_team) +
+          " — head to head</h3>" +
+          "<p>" + esc(tally) + " in their last " + d.meetings.length +
+          " meeting" + (d.meetings.length === 1 ? "" : "s") + ".</p>" +
+          (rows ? '<ul class="scores">' + rows + "</ul>"
+                : "<p>No meetings in the data.</p>") +
+          '<div class="disclaimer">From the model’s data, to ' +
+          esc(d.data_as_of || "—") + ".</div>");
+      });
+  }
+
+  function chatNext(team, league) {
+    chatGet("/fixtures?league=" + encodeURIComponent(league) +
+            "&team=" + encodeURIComponent(team),
+            "Finding " + team + "’s next match…")
+      .then(function (body) {
+        if (!body) return;
+        if (!body.fixtures || !body.fixtures.length) {
+          addChatMsg("agent", "<b>No upcoming match for " + esc(team) +
+            " in the data.</b><br>" + esc(body.message || "") +
+            "<br>Name two teams and I’ll predict that match instead.");
+          return;
+        }
+        var fx = body.fixtures[0];
+        addChatMsg("agent", "<b>" + esc(team) + "’s next match:</b> " +
+          esc(fx.home_team) + " vs " + esc(fx.away_team) + " on " +
+          esc(fx.date) + ".");
+        chatPredict(fx.home_team, fx.away_team, league);
+      });
+  }
+
   function handleChat(text) {
     var raw = String(text || "").trim();
     if (!raw || chatBusy) return;
     addChatMsg("user", esc(raw));
-    var res = parseChatMessage(raw, pendingTeam);
+    var res = parseChatMessage(raw, pendingTeam, leagueSelect.value);
     if (res.kind === "greeting") { addChatMsg("agent", CHAT_GREETING); return; }
     if (res.kind === "help") { addChatMsg("agent", CHAT_HELP); return; }
+    if (res.kind === "today") { chatToday(res.when, res.league); return; }
+    if (res.kind === "weekend") {
+      addChatMsg("agent", "I list matches day by day — try <b>“today’s matches”</b> " +
+        "or <b>“tomorrow’s matches”</b>.");
+      return;
+    }
+    if (res.kind === "ratings") { chatRatings(res.league); return; }
+    if (res.kind === "form") { chatForm(res.team, res.league); return; }
+    if (res.kind === "next") { chatNext(res.team, res.league); return; }
+    if (res.kind === "h2h") { chatH2H(res.home, res.away, res.league); return; }
+    if (res.kind === "multi") {
+      pendingTeam = null;
+      chatMulti(res.pairs, res.league);
+      return;
+    }
     if (res.kind === "need-teams") {
       addChatMsg("agent", "I need two team names to predict a match — for example " +
         "“Arsenal vs Chelsea”. Which two teams?");
@@ -989,7 +1339,7 @@ function parseChatMessage(text, pendingTeam) {
     }
     // predict
     pendingTeam = null;
-    chatPredict(res.home, res.away, leagueSelect.value);
+    chatPredict(res.home, res.away, res.league);
   }
 
   chatForm.addEventListener("submit", function (ev) {

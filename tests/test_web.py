@@ -51,6 +51,24 @@ def test_root_page_has_no_betting_language():
     assert "guaranteed win" not in html
 
 
+def test_chatbot_panel_has_wider_chat_examples():
+    """The Chatbot tab offers today's matches, form and league-winner
+    example chips, and its help text names them."""
+    with _client() as client:
+        html = client.get("/").text
+    assert "Today's matches" in html
+    assert "Arsenal's form" in html
+    assert "Who will win the Premier League?" in html
+    assert "today’s matches" in html
+    assert "head to head" in html
+    # The new question endpoints are wired into the page JS.
+    assert '"/fixtures?league="' in html
+    assert '"/team?team="' in html
+    assert '"/ratings?league="' in html
+    assert '"/head-to-head?home_team="' in html
+    assert '"/predict-batch"' in html
+
+
 def test_health_and_docs_still_work():
     with _client() as client:
         assert client.get("/health").status_code == 200
