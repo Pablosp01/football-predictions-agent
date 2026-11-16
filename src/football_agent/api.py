@@ -1010,20 +1010,55 @@ def predict_batch(req: BatchRequest) -> dict:
             "disclaimer": DISCLAIMER}
 
 
+def _team_last5(predictor, team: str) -> tuple[list[str], float]:
+    """A team's last-5 form letters (oldest first) and points per game,
+    from the fitted history. Shared by /ratings (and the same logic
+    lives in /team) so a league-winner answer is data — rating plus
+    recent form and points — not just one favourite name."""
+    played = [m for m in predictor.history
+              if m.home_team == team or m.away_team == team]
+    recent = sorted(played, key=lambda m: m.date)[-5:]
+    form: list[str] = []
+    points = 0
+    for m in recent:
+        if m.home_team == team:
+            gf, ga = m.home_goals or 0, m.away_goals or 0
+        else:
+            gf, ga = m.away_goals or 0, m.home_goals or 0
+        if gf > ga:
+            form.append("W")
+            points += 3
+        elif gf == ga:
+            form.append("D")
+            points += 1
+        else:
+            form.append("L")
+    n = len(recent)
+    return form, round(points / n, 2) if n else 0.0
+
+
 @app.get("/ratings", dependencies=[Depends(require_api_key)])
 def ratings(league: str = "PL") -> dict:
-    """Elo table for a league, strongest first.
+    """Elo table for a league, strongest first, with each team's
+    recent form and points per game.
 
     The model's answer to "who is the best team / who will win the
-    league": the highest Elo rating. Ratings come from the fitted
-    history, so data_as_of is the last match date in that history.
+    league": the highest Elo rating, backed by the last-5 form and
+    points — not a favourite name on its own. Ratings come from the
+    fitted history, so data_as_of is the last match date in that
+    history.
     """
     league = _require_known_league(league)
     predictor = get_predictor(league)
-    rows = sorted(
-        ({"team": t, "rating": round(predictor.elo.rating(t), 1)}
-         for t in _known_teams(league)),
-        key=lambda r: -r["rating"])
+
+    def _row(team: str) -> dict:
+        form, ppg = _team_last5(predictor, team)
+        return {"team": team,
+                "rating": round(predictor.elo.rating(team), 1),
+                "form": form, "points_per_game": ppg}
+
+    rows = sorted((_row(t) for t in _known_teams(league)),
+                  key=lambda r: -r["rating"])
     last = predictor.history[-1].date if predictor.history else None
     return {"league": league, "ratings": rows,
             "data_as_of": last.isoformat() if last else None,

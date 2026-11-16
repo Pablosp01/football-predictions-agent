@@ -302,6 +302,22 @@ def test_ratings_pl_sorted_descending(client):
     assert ratings == sorted(ratings, reverse=True)
     assert body["ratings"][0]["team"] in {row["team"] for row in body["ratings"]}
     assert all(isinstance(row["rating"], float) for row in body["ratings"])
+    # Each row carries the data behind the ranking, not just a number.
+    for row in body["ratings"]:
+        assert isinstance(row["form"], list) and len(row["form"]) <= 5
+        assert all(letter in "WDL" for letter in row["form"])
+        assert isinstance(row["points_per_game"], (int, float))
+
+
+def test_ratings_nations_league_has_form(client):
+    r = client.get("/ratings", params={"league": "NL"})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["league"] == "NL"
+    top = body["ratings"][0]
+    assert top["team"] == "Spain"
+    assert isinstance(top["form"], list) and len(top["form"]) == 5
+    assert top["points_per_game"] > 0
 
 
 def test_team_arsenal_form_card(client):

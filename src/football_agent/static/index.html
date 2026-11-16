@@ -1299,16 +1299,18 @@ function parseChatMessage(text, pendingTeam, defaultLeague) {
         if (!d) return;
         var top = d.ratings.slice(0, 5);
         var rows = top.map(function (r, i) {
+          var form = (r.form || []).join(" ");
           return "<li><span>" + (i + 1) + ". " + esc(r.team) + "</span><span>" +
-            esc(String(r.rating)) + "</span></li>";
+            esc(String(r.rating)) + " · " + esc(form) + " · " +
+            esc(String(r.points_per_game)) + " pts/game</span></li>";
         }).join("");
         var fav = d.ratings[0];
         addChatMsg("agent", "<h3>Strongest teams — " + esc(d.league) + "</h3>" +
-          "<p>By Elo rating, the model’s favourite is <b>" + esc(fav.team) +
-          "</b> (" + esc(String(fav.rating)) + ").</p>" +
+          "<p>On the model’s data — Elo rating plus recent form — the strongest is <b>" + esc(fav.team) +
+          "</b> (" + esc(String(fav.rating)) + ", form " + esc((fav.form || []).join(" ")) + ").</p>" +
           '<ul class="scores">' + rows + "</ul>" +
-          '<div class="disclaimer">Ratings from the model’s data, to ' +
-          esc(d.data_as_of || "—") + ". A favourite is not a guarantee.</div>");
+          '<div class="disclaimer">Ratings and form from the model’s data, to ' +
+          esc(d.data_as_of || "—") + ". This does not yet include current injuries or news.</div>");
       });
   }
 
