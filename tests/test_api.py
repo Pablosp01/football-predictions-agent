@@ -64,6 +64,15 @@ def _fake_espn_get(url, timeout=None):
         return _FakeEspnResponse({"events": [
             _espn_event("2026-07-19T19:00Z", "pre", "Brazil", "Argentina"),
         ]})
+    if "eng.1" in url and "dates=20261116" in url:
+        # A real PL fixture, plus a phantom one: ESPN lists Coventry
+        # City (a Championship team) in the eng.1 feed. The model
+        # must not resolve Coventry to Man City and predict it.
+        return _FakeEspnResponse({"events": [
+            _espn_event("2026-11-16T15:00Z", "pre", "Arsenal", "Chelsea"),
+            _espn_event("2026-11-16T17:30Z", "pre", "Coventry City",
+                        "Crystal Palace"),
+        ]})
     return _FakeEspnResponse({"events": []})
 
 
@@ -99,6 +108,34 @@ def test_predict_arsenal_chelsea(client):
     assert len(body["top_scorelines"]) == 5
     assert body["top_scorelines"][0]["score"] and body["top_scorelines"][0]["prob"] > 0
     assert body["factors"]
+
+
+def test_predict_coventry_city_is_not_man_city(client):
+    """A substring alias must not claim a team: "Coventry City" is
+    not Man City, even though the alias "city" is a substring of it.
+    ESPN lists Coventry vs Crystal Palace in the eng.1 feed, and the
+    old alias match predicted it as Man City."""
+    r = client.post("/predict", json={"home_team": "Coventry City",
+                                      "away_team": "Crystal Palace"})
+    assert r.status_code == 400, r.text
+    assert "Unknown team" in r.json()["detail"]["error"]
+
+
+def test_predict_city_alias_still_man_city(client):
+    """Typing just "City" must still resolve to Man City."""
+    r = client.post("/predict", json={"home_team": "City",
+                                      "away_team": "Chelsea"})
+    assert r.status_code == 200, r.text
+    assert r.json()["home_team"] == "Man City"
+
+
+def test_api_responses_are_not_cached(client):
+    """Every answer is fresh: a deploy changes the answers, and a
+    saved copy shows the old behaviour (the 2026-11-16 /today stale
+    read)."""
+    r = client.get("/health")
+    assert r.status_code == 200
+    assert "no-store" in r.headers.get("cache-control", "")
 
 
 def test_predict_aliases(client):
@@ -212,9 +249,7 @@ def test_today_lists_nations_league_matches(client):
     assert r.status_code == 200, r.text
     body = r.json()
     assert body["date"] == "2026-11-16"
-    assert len(body["groups"]) == 1
-    group = body["groups"][0]
-    assert group["league"] == "NL"
+    group = next(g for g in body["groups"] if g["league"] == "NL")
     assert group["label"] == "UEFA Nations League"
     assert len(group["fixtures"]) == 2  # finished match excluded
     fx = group["fixtures"][0]
@@ -262,7 +297,14 @@ def test_today_searches_all_leagues(client):
         r = client.get("/today", params={"date": "2026-11-16"})
     assert r.status_code == 200, r.text
     body = r.json()
-    assert [g["league"] for g in body["groups"]] == ["NL"]
+    assert [g["league"] for g in body["groups"]] == ["PL", "NL"]
+    pl = body["groups"][0]
+    # The phantom Coventry fixture is dropped, not predicted as
+    # Man City: only the real Arsenal vs Chelsea is listed.
+    assert len(pl["fixtures"]) == 1
+    assert pl["fixtures"][0]["home_team"] == "Arsenal"
+    assert pl["fixtures"][0]["away_team"] == "Chelsea"
+    assert pl["fixtures"][0]["prediction"] is not None
     assert [u["league"] for u in body["unavailable"]] == ["ELC", "DED"]
     assert body["unavailable"][0] == {
         "league": "ELC", "label": "Championship", "fixtures": 1}

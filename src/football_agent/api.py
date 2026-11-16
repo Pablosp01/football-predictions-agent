@@ -140,9 +140,11 @@ def resolve_team(name: str, league: str) -> str:
     for normed, canonical in by_norm.items():
         if key and (key in normed or normed in key):
             return canonical
-    for alias, canonical in ALIASES.items():
-        if canonical in known and (key in alias or alias in key):
-            return canonical
+    # Aliases are exact only (line 136 above): a substring alias
+    # ("city" for Man City) would otherwise claim any team whose name
+    # contains it — "Coventry City" resolved to Man City, and the
+    # model then predicted a match that does not exist (ESPN lists
+    # Coventry vs Crystal Palace in the eng.1 feed for 2026-11-21).
     suggestions = difflib.get_close_matches(name, known, n=3, cutoff=0.55)
     if not suggestions:
         suggestions = difflib.get_close_matches(key, [_norm(t) for t in known],
@@ -902,6 +904,18 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"], allow_methods=["*"], allow_headers=["*"],
 )
+
+
+@app.middleware("http")
+async def _no_store(request, call_next):
+    """Never let a browser cache any response: a deploy changes the
+    page and the answers, and a saved copy shows the old behaviour
+    after an update. The page itself was already no-store; the
+    2026-11-16 /today check showed a saved JSON answer doing the
+    same thing, so this covers every response."""
+    response = await call_next(request)
+    response.headers["Cache-Control"] = "no-store"
+    return response
 
 
 @app.get("/health")
