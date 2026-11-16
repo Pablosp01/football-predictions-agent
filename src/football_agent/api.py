@@ -920,7 +920,14 @@ def web_chat():
     No ChatGPT plan needed.
     """
     if INDEX_HTML.is_file():
-        return FileResponse(INDEX_HTML, media_type="text/html")
+        # Never cache the page: it is the whole app (HTML + JS inline),
+        # and a deploy changes it. Without this, a browser keeps
+        # serving the previous deploy's page — the old dropdown, the
+        # old chatbot — after a new version is live. That was the
+        # 2026-11-16 false failure: the live site was already new,
+        # but the checking browser showed its saved old copy.
+        return FileResponse(INDEX_HTML, media_type="text/html",
+                            headers={"Cache-Control": "no-store"})
     return PlainTextResponse(
         "Football Predictions Agent — web page file is missing. "
         "The API still works: GET /health, POST /predict.",

@@ -71,6 +71,17 @@ def test_chatbot_panel_has_wider_chat_examples():
     assert '"/predict-batch"' in html
 
 
+def test_page_is_not_cached():
+    """The page must never be served from a browser cache: it is the
+    whole app, and a deploy changes it. A cached copy after a deploy
+    shows the old dropdown and the old chatbot (false failure on
+    2026-11-16)."""
+    with _client() as client:
+        r = client.get("/")
+    assert r.status_code == 200
+    assert "no-store" in r.headers.get("cache-control", "")
+
+
 def test_page_has_no_handler_name_collisions():
     """A page function must not share its name with a DOM-element
     variable: the element assignment overwrites the hoisted function,
