@@ -16,6 +16,7 @@ import logging
 import os
 import re
 import time
+import unicodedata
 from datetime import date as _date
 from datetime import datetime as _datetime
 from datetime import timezone as _timezone
@@ -53,11 +54,26 @@ DISCLAIMER = (
 # ---------------------------------------------------------------------------
 
 def _norm(name: str) -> str:
-    """Lowercase, strip punctuation/FC suffix, collapse whitespace."""
-    s = name.strip().lower()
-    s = re.sub(r"[^a-z0-9' ]", " ", s)
+    """Lowercase, fold accents to plain letters, strip punctuation
+    and FC suffixes, collapse whitespace.
+
+    Accents are folded, not dropped: "Alavés" becomes "alaves", so
+    Vincent typing "Alaves" (no accent) still matches. The old
+    version replaced é/ñ with a space, so "Alavés" became "alav s"
+    and "Alaves" matched nothing (2026-11-17).
+    """
+    folded = unicodedata.normalize("NFKD", name.strip().lower())
+    folded = "".join(ch for ch in folded if not unicodedata.combining(ch))
+    s = re.sub(r"[^a-z0-9' ]", " ", folded)
     s = re.sub(r"\b(fc|football club|afc)\b", " ", s)
     return re.sub(r"\s+", " ", s).strip()
+
+
+# Articles that carry no meaning in a team name: "RC Deportivo de
+# A Coruña" and "RC Deportivo La Coruña" are the same team, so the
+# word match ignores them on both sides.
+_ARTICLES = {"a", "la", "el", "los", "las", "the", "de", "del",
+             "di", "des", "les", "van", "von"}
 
 
 # Keys are normalised; values are the canonical names the key can
@@ -115,6 +131,14 @@ ALIASES = {
     "wolves": ["Wolverhampton Wanderers FC", "Wolves"],
     "wolverhampton": ["Wolverhampton Wanderers FC", "Wolves"],
     "wolverhampton wanderers": ["Wolverhampton Wanderers FC", "Wolves"],
+    # English names for teams whose live names are local:
+    # "Bayern Munich" for FC Bayern München, "Inter Milan" for
+    # FC Internazionale Milano, "Cologne" for 1. FC Köln,
+    # "Turin" for Torino FC.
+    "bayern munich": ["FC Bayern München", "Bayern Munich"],
+    "inter milan": ["FC Internazionale Milano", "Inter"],
+    "cologne": ["1. FC Köln", "Cologne"],
+    "turin": ["Torino FC", "Torino"],
     # International teams (names as in the bundled international sample).
     "usa": ["United States"], "us": ["United States"],
     "america": ["United States"],
@@ -173,20 +197,24 @@ def resolve_team(name: str, league: str) -> str:
     for normed, canonical in by_norm.items():
         if key and (key in normed or normed in key):
             return canonical
-    # Word match: every word of the name appears in the canonical
-    # name ("Celta Vigo" -> "RC Celta de Vigo", whose words are not
-    # contiguous). Only for multi-word names — a single word is too
-    # ambiguous ("Real" matches half the league).
-    key_words = set(key.split())
+    # Word match: every non-article word of the name appears in
+    # the canonical name ("Celta Vigo" -> "RC Celta de Vigo",
+    # whose words are not contiguous). Articles are ignored on
+    # both sides, so "RC deportivo de A coruna" still finds "RC
+    # Deportivo La Coruña" — "a" and "la" are the same word for
+    # this purpose. Only for multi-word names — a single word is
+    # too ambiguous ("Real" matches half the league).
+    key_words = {w for w in key.split() if w not in _ARTICLES}
     if len(key_words) > 1:
         for normed, canonical in by_norm.items():
-            if key_words <= set(normed.split()):
+            rest = {w for w in normed.split() if w not in _ARTICLES}
+            if key_words <= rest:
                 return canonical
-    # Aliases are exact only (line 136 above): a substring alias
-    # ("city" for Man City) would otherwise claim any team whose name
-    # contains it — "Coventry City" resolved to Man City, and the
-    # model then predicted a match that does not exist (ESPN lists
-    # Coventry vs Crystal Palace in the eng.1 feed for 2026-11-21).
+    # Aliases are exact only: a substring alias ("city" for Man
+    # City) would otherwise claim any team whose name contains it
+    # — "Coventry City" resolved to Man City, and the model then
+    # predicted a match that does not exist (ESPN lists Coventry
+    # vs Crystal Palace in the eng.1 feed for 2026-11-21).
     suggestions = difflib.get_close_matches(name, known, n=3, cutoff=0.55)
     if not suggestions:
         suggestions = difflib.get_close_matches(key, [_norm(t) for t in known],

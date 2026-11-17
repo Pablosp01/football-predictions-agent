@@ -71,6 +71,7 @@ CASES = [
     ["Coventry City vs Crystal Palace", None, "PL"],
     ["Man Utd vs Liverpool", None, "PL"],
     ["Man City vs Fulham", None, "PL"],
+    ["Alavés vs RC Deportivo de La Coruña", None, "PD"],
 ]
 
 
@@ -97,7 +98,7 @@ def test_chat_parser_kinds():
         "today",
         "predict",
         "form", "form",
-        "predict", "predict", "predict", "predict",
+        "predict", "predict", "predict", "predict", "predict",
     ]
 
 
@@ -148,6 +149,12 @@ def test_chat_parser_fields():
     assert by_text["Man City vs Fulham"] == {
         "kind": "predict", "home": "Man City", "away": "Fulham",
         "league": "PL"}
+
+    # Accents fold to plain letters, so an accented name typed in
+    # the chatbot still reaches the API intact.
+    assert by_text["Alavés vs RC Deportivo de La Coruña"] == {
+        "kind": "predict", "home": "alaves",
+        "away": "rc deportivo de la coruna", "league": "PD"}
 
     assert by_text["Who will win the Premier League?"] == {
         "kind": "ratings", "league": "PL"}

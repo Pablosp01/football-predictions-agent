@@ -304,6 +304,58 @@ def test_resolve_team_live_names():
         assert api.resolve_team("United", "PL") == "Manchester United FC"
 
 
+def test_resolve_team_folds_accents():
+    """Accents fold to plain letters: Vincent typing 'Alaves'
+    (no accent) must match the live 'Deportivo Alavés', and
+    'Atletico Madrid' must match 'Club Atlético de Madrid'.
+    Articles are ignored in the word match, so 'RC deportivo
+    de A coruna' still finds 'RC Deportivo La Coruña'."""
+    live_pd = ["FC Barcelona", "Real Madrid CF", "Club Atlético de Madrid",
+               "Real Betis Balompié", "Real Sociedad de Fútbol",
+               "Athletic Club", "Sevilla FC", "RC Deportivo La Coruña",
+               "Villarreal CF", "RC Celta de Vigo",
+               "Rayo Vallecano de Madrid",
+               "Real Racing Club de Santander", "Deportivo Alavés",
+               "Levante UD", "Getafe CF", "CA Osasuna",
+               "RCD Espanyol de Barcelona", "Elche CF", "Valencia CF",
+               "Málaga CF"]
+    with patch.object(api, "_known_teams", lambda league: live_pd):
+        assert api.resolve_team("Alaves", "PD") == "Deportivo Alavés"
+        assert api.resolve_team("Atletico Madrid", "PD") == "Club Atlético de Madrid"
+        assert api.resolve_team("Malaga", "PD") == "Málaga CF"
+        assert api.resolve_team("Real Sociedad", "PD") == "Real Sociedad de Fútbol"
+        assert api.resolve_team("RC deportivo de A coruna", "PD") == "RC Deportivo La Coruña"
+
+
+def test_resolve_team_english_names():
+    """English names for teams whose live names are local:
+    'Bayern Munich' for FC Bayern München, 'Inter Milan' for
+    FC Internazionale Milano, 'Cologne' for 1. FC Köln,
+    'Turin' for Torino FC."""
+    live_bl1 = ["FC Bayern München", "Borussia Dortmund", "SC Freiburg",
+                "RB Leipzig", "SV Werder Bremen", "Bayer 04 Leverkusen",
+                "Eintracht Frankfurt", "SV 07 Elversberg", "VfB Stuttgart",
+                "Hamburger SV", "TSG 1899 Hoffenheim", "SC Paderborn 07",
+                "1. FSV Mainz 05", "FC Augsburg", "1. FC Köln",
+                "1. FC Union Berlin", "FC Schalke 04",
+                "Borussia Mönchengladbach"]
+    with patch.object(api, "_known_teams", lambda league: live_bl1):
+        assert api.resolve_team("Bayern Munich", "BL1") == "FC Bayern München"
+        assert api.resolve_team("Bayern München", "BL1") == "FC Bayern München"
+        assert api.resolve_team("Cologne", "BL1") == "1. FC Köln"
+        assert api.resolve_team("Monchengladbach", "BL1") == "Borussia Mönchengladbach"
+    live_sa = ["SS Lazio", "AS Roma", "FC Internazionale Milano", "AC Milan",
+               "Como 1907", "Frosinone Calcio", "Juventus FC",
+               "Bologna FC 1909", "SSC Napoli", "Cagliari Calcio",
+               "Torino FC", "Atalanta BC", "Genoa CFC", "ACF Fiorentina",
+               "US Lecce", "US Sassuolo Calcio", "Parma Calcio 1913",
+               "AC Monza", "Venezia FC", "Udinese Calcio"]
+    with patch.object(api, "_known_teams", lambda league: live_sa):
+        assert api.resolve_team("Inter Milan", "SA") == "FC Internazionale Milano"
+        assert api.resolve_team("Turin", "SA") == "Torino FC"
+        assert api.resolve_team("Inter", "SA") == "FC Internazionale Milano"
+
+
 def test_predict_survives_a_rate_limited_league(client):
     """The 2026-11-17 09:29 failure: a cold restart made the
     fallback search fetch nine leagues at once, the free feed

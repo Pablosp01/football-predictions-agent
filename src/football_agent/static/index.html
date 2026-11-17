@@ -374,7 +374,11 @@ var CHAT_TEAMS = [
 ];
 
 function chatNorm(s) {
-  return String(s).toLowerCase().replace(/[^a-z0-9' ]/g, " ")
+  // Fold accents to plain letters first ("Alavés" -> "alaves"):
+  // dropping them to spaces instead made "Alavés" into "alav s",
+  // which matched nothing (2026-11-17).
+  return String(s).toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "")
+    .replace(/[^a-z0-9' ]/g, " ")
     .replace(/\s+/g, " ").replace(/^ | $/g, "");
 }
 
@@ -506,7 +510,10 @@ function chatSplitSides(normed) {
   var home = chatCleanSide(parts[0]);
   var away = chatCleanSide(parts.slice(1).join(" "));
   if (!home || !away) return null;
-  if (home.split(" ").length > 4 || away.split(" ").length > 4) return null;
+  // Five words, not four: the longest real team names are five
+  // ("Real Racing Club de Santander", and "RC Deportivo de A
+  // Coruña" as Vincent types it) — four rejected them.
+  if (home.split(" ").length > 5 || away.split(" ").length > 5) return null;
   return [home, away];
 }
 
