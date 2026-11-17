@@ -67,6 +67,10 @@ CASES = [
     # is server-side, not in the parser).
     ["Arsenal's form", None, "ELC"],
     ["Spain's form", None, "PL"],
+    ["Chelsea vs Leed united", None, "PL"],
+    ["Coventry City vs Crystal Palace", None, "PL"],
+    ["Man Utd vs Liverpool", None, "PL"],
+    ["Man City vs Fulham", None, "PL"],
 ]
 
 
@@ -93,6 +97,7 @@ def test_chat_parser_kinds():
         "today",
         "predict",
         "form", "form",
+        "predict", "predict", "predict", "predict",
     ]
 
 
@@ -126,6 +131,23 @@ def test_chat_parser_fields():
                            "league": "ELC"}
     assert results[31] == {"kind": "form", "team": "Spain",
                            "league": "NL"}
+
+    # A typo'd team next to a "vs" goes to the API as written, so it
+    # can suggest the closest name — the bare word "united" must not
+    # claim "Leed united" as Man Utd, and "city" must not claim
+    # Coventry City as Man City.
+    assert by_text["Chelsea vs Leed united"] == {
+        "kind": "predict", "home": "chelsea", "away": "leed united",
+        "league": "PL"}
+    assert by_text["Coventry City vs Crystal Palace"] == {
+        "kind": "predict", "home": "coventry city",
+        "away": "crystal palace", "league": "PL"}
+    assert by_text["Man Utd vs Liverpool"] == {
+        "kind": "predict", "home": "Man Utd", "away": "Liverpool",
+        "league": "PL"}
+    assert by_text["Man City vs Fulham"] == {
+        "kind": "predict", "home": "Man City", "away": "Fulham",
+        "league": "PL"}
 
     assert by_text["Who will win the Premier League?"] == {
         "kind": "ratings", "league": "PL"}

@@ -60,41 +60,69 @@ def _norm(name: str) -> str:
     return re.sub(r"\s+", " ", s).strip()
 
 
-# Keys are normalised; values are the canonical names used by the model.
+# Keys are normalised; values are the canonical names the key can
+# mean, live name first, sample name second — the first one present
+# in the league's team list wins. The live football-data.org names
+# ("Manchester City FC") differ from the bundled sample names
+# ("Man City"), so one alias must cover both: "Man City" resolves
+# to nothing in the live data (the re-test on 2026-11-17 showed
+# "Unknown team: 'Man City'"), and "Manchester City FC" resolves
+# to nothing in the sample data.
 ALIASES = {
-    "man utd": "Man Utd", "man united": "Man Utd", "manchester united": "Man Utd",
-    "manchester utd": "Man Utd", "united": "Man Utd",
-    "man city": "Man City", "manchester city": "Man City", "city": "Man City",
-    "tottenham": "Tottenham", "tottenham hotspur": "Tottenham", "spurs": "Tottenham",
-    "arsenal": "Arsenal", "the gunners": "Arsenal",
-    "aston villa": "Aston Villa", "villa": "Aston Villa",
-    "bournemouth": "Bournemouth",
-    "brentford": "Brentford",
-    "brighton": "Brighton", "brighton and hove albion": "Brighton",
-    "brighton hove albion": "Brighton",
-    "chelsea": "Chelsea",
-    "crystal palace": "Crystal Palace", "palace": "Crystal Palace",
-    "everton": "Everton",
-    "fulham": "Fulham",
-    "ipswich": "Ipswich", "ipswich town": "Ipswich",
-    "leeds": "Leeds", "leeds united": "Leeds",
-    "leicester": "Leicester", "leicester city": "Leicester",
-    "liverpool": "Liverpool",
-    "newcastle": "Newcastle", "newcastle united": "Newcastle",
-    "nottm forest": "Nott'm Forest", "nottingham forest": "Nott'm Forest",
-    "forest": "Nott'm Forest",
-    "southampton": "Southampton", "saints": "Southampton",
-    "sunderland": "Sunderland",
-    "west ham": "West Ham", "west ham united": "West Ham",
-    "wolves": "Wolves", "wolverhampton": "Wolves",
-    "wolverhampton wanderers": "Wolves",
+    "man utd": ["Manchester United FC", "Man Utd"],
+    "man united": ["Manchester United FC", "Man Utd"],
+    "manchester united": ["Manchester United FC", "Man Utd"],
+    "manchester utd": ["Manchester United FC", "Man Utd"],
+    "united": ["Manchester United FC", "Man Utd"],
+    "man city": ["Manchester City FC", "Man City"],
+    "manchester city": ["Manchester City FC", "Man City"],
+    "city": ["Manchester City FC", "Man City"],
+    "tottenham": ["Tottenham Hotspur FC", "Tottenham"],
+    "tottenham hotspur": ["Tottenham Hotspur FC", "Tottenham"],
+    "spurs": ["Tottenham Hotspur FC", "Tottenham"],
+    "arsenal": ["Arsenal FC", "Arsenal"],
+    "the gunners": ["Arsenal FC", "Arsenal"],
+    "aston villa": ["Aston Villa FC", "Aston Villa"],
+    "villa": ["Aston Villa FC", "Aston Villa"],
+    "bournemouth": ["AFC Bournemouth", "Bournemouth"],
+    "brentford": ["Brentford FC", "Brentford"],
+    "brighton": ["Brighton & Hove Albion FC", "Brighton"],
+    "brighton and hove albion": ["Brighton & Hove Albion FC", "Brighton"],
+    "brighton hove albion": ["Brighton & Hove Albion FC", "Brighton"],
+    "chelsea": ["Chelsea FC", "Chelsea"],
+    "crystal palace": ["Crystal Palace FC", "Crystal Palace"],
+    "palace": ["Crystal Palace FC", "Crystal Palace"],
+    "everton": ["Everton FC", "Everton"],
+    "fulham": ["Fulham FC", "Fulham"],
+    "ipswich": ["Ipswich Town FC", "Ipswich"],
+    "ipswich town": ["Ipswich Town FC", "Ipswich"],
+    "leeds": ["Leeds United FC", "Leeds"],
+    "leeds united": ["Leeds United FC", "Leeds"],
+    "leicester": ["Leicester City FC", "Leicester"],
+    "leicester city": ["Leicester City FC", "Leicester"],
+    "liverpool": ["Liverpool FC", "Liverpool"],
+    "newcastle": ["Newcastle United FC", "Newcastle"],
+    "newcastle united": ["Newcastle United FC", "Newcastle"],
+    "nottm forest": ["Nottingham Forest FC", "Nott'm Forest"],
+    "nott'm forest": ["Nottingham Forest FC", "Nott'm Forest"],
+    "nottingham forest": ["Nottingham Forest FC", "Nott'm Forest"],
+    "forest": ["Nottingham Forest FC", "Nott'm Forest"],
+    "southampton": ["Southampton FC", "Southampton"],
+    "saints": ["Southampton FC", "Southampton"],
+    "sunderland": ["Sunderland AFC", "Sunderland"],
+    "west ham": ["West Ham United FC", "West Ham"],
+    "west ham united": ["West Ham United FC", "West Ham"],
+    "wolves": ["Wolverhampton Wanderers FC", "Wolves"],
+    "wolverhampton": ["Wolverhampton Wanderers FC", "Wolves"],
+    "wolverhampton wanderers": ["Wolverhampton Wanderers FC", "Wolves"],
     # International teams (names as in the bundled international sample).
-    "usa": "United States", "us": "United States", "america": "United States",
-    "united states of america": "United States",
-    "cote d'ivoire": "Ivory Coast", "c te d'ivoire": "Ivory Coast",
-    "czechia": "Czech Republic", "ir iran": "Iran",
-    "korea republic": "South Korea", "turkiye": "Turkey",
-    "holland": "Netherlands",
+    "usa": ["United States"], "us": ["United States"],
+    "america": ["United States"],
+    "united states of america": ["United States"],
+    "cote d'ivoire": ["Ivory Coast"], "c te d'ivoire": ["Ivory Coast"],
+    "czechia": ["Czech Republic"], "ir iran": ["Iran"],
+    "korea republic": ["South Korea"], "turkiye": ["Turkey"],
+    "holland": ["Netherlands"],
 }
 
 
@@ -134,8 +162,13 @@ def resolve_team(name: str, league: str) -> str:
     key = _norm(name)
     if key in by_norm:
         return by_norm[key]
-    if key in ALIASES and ALIASES[key] in known:
-        return ALIASES[key]
+    # Aliases cover both name eras (live "Manchester City FC" and
+    # sample "Man City"): the first candidate present in this
+    # league's team list wins.
+    if key in ALIASES:
+        for candidate in ALIASES[key]:
+            if candidate in known:
+                return candidate
     # Substring match either way ("Newcastle" in "Newcastle United", etc.)
     for normed, canonical in by_norm.items():
         if key and (key in normed or normed in key):
@@ -176,10 +209,19 @@ _LEAGUE_SEARCH_ORDER = ["PL", "PD", "SA", "BL1", "FL1", "DED", "PPL",
 
 
 def _resolve_team_quiet(name: str, league: str) -> str | None:
-    """resolve_team without raising: the canonical name, or None."""
+    """resolve_team without raising: the canonical name, or None.
+
+    Any failure counts as "not in this league" — including the data
+    feed failing. A rate limit returns 429, which is not an
+    HTTPException, so catching only that would let one league's
+    failed fetch 500 the whole request: that is what broke
+    predictions at 09:29 on 2026-11-17, when a cold restart made
+    the fallback search fetch nine leagues at once and the free
+    feed capped at 10 requests a minute.
+    """
     try:
         return resolve_team(name, league)
-    except HTTPException:
+    except Exception:
         return None
 
 
@@ -197,16 +239,29 @@ def resolve_team_anywhere(name: str, league: str) -> tuple[str, str]:
     Championship came back "Unknown team" — the model has Arsenal in
     the Premier League, and the answer should come from there.
     """
+    first_error = None
     try:
         return resolve_team(name, league), league
-    except HTTPException as first_error:
-        for other in _LEAGUE_SEARCH_ORDER:
-            if other == league:
-                continue
-            found = _resolve_team_quiet(name, other)
-            if found is not None:
-                return found, other
+    except HTTPException as err:
+        first_error = err
+    except Exception:
+        # The requested league's data could not be fetched at all
+        # (the feed rate-limited us, or the network failed): there
+        # is no "unknown team" error to keep — try the other leagues,
+        # which may be cached, and say the feed is unavailable if
+        # none of them resolves the team either.
+        first_error = None
+    for other in _LEAGUE_SEARCH_ORDER:
+        if other == league:
+            continue
+        found = _resolve_team_quiet(name, other)
+        if found is not None:
+            return found, other
+    if first_error is not None:
         raise first_error
+    raise HTTPException(status_code=503, detail={
+        "error": "The live data feed is temporarily unavailable — try again in a minute.",
+    })
 
 
 # ---------------------------------------------------------------------------
@@ -222,7 +277,17 @@ def get_predictor(league: str) -> Predictor:
     league = _require_known_league(league)
     if league not in _predictors:
         provider = get_provider(league)
-        matches = provider.matches(league)
+        try:
+            matches = provider.matches(league)
+        except Exception as err:
+            # A failed fetch (the free feed rate-limits at 10
+            # requests a minute) is a temporary 503, never a 500:
+            # the request can be retried in a minute.
+            logger.warning("data feed failed for league %s: %r", league, err)
+            raise HTTPException(status_code=503, detail={
+                "error": f"The live data feed is temporarily unavailable for league '{league}'",
+                "hint": "The free data feed allows 10 requests a minute — try again in a minute.",
+            })
         if len(matches) < 10:
             if os.environ.get("FOOTBALL_DATA_API_KEY"):
                 hint = (f"The live feed returned only {len(matches)} finished "
@@ -370,7 +435,9 @@ def _predict_one_anywhere(home: str, away: str,
             continue
         try:
             predictor = get_predictor(league)
-        except HTTPException:
+        except Exception:
+            # The league's data could not be fetched (rate limit):
+            # skip it, do not fail the whole request.
             continue
         return _prediction_out(predictor.predict(home_c, away_c), league)
     return None
@@ -1280,7 +1347,9 @@ def _head_to_head_in_league(home_team: str, away_team: str,
         return None
     try:
         predictor = get_predictor(league)
-    except HTTPException:
+    except Exception:
+        # The league's data could not be fetched (rate limit):
+        # skip it, do not fail the whole request.
         return None
     return _head_to_head_result(home, away, predictor, league)
 
@@ -1374,7 +1443,14 @@ def fixtures(league: str = "PL",
     provider = get_provider(league)
     espn_ok = False
     if os.environ.get("FOOTBALL_DATA_API_KEY"):
-        days_fixtures = provider.fixtures(league, on)
+        try:
+            days_fixtures = provider.fixtures(league, on)
+        except Exception as err:
+            logger.warning("live fixtures failed for league %s: %r", league, err)
+            raise HTTPException(status_code=503, detail={
+                "error": f"The live data feed is temporarily unavailable for league '{league}'",
+                "hint": "The free data feed allows 10 requests a minute — try again in a minute.",
+            })
     else:
         # Live fixtures from ESPN's free scoreboard (no key). On
         # failure fall back to the bundled sample, which has no

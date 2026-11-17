@@ -194,8 +194,8 @@ var CHAT_TEAMS = [
 ["Leeds", ["leeds", "leeds united"]],
 ["Leicester", ["leicester", "leicester city"]],
 ["Liverpool", ["liverpool"]],
-["Man City", ["man city", "manchester city", "city"]],
-["Man Utd", ["man utd", "man united", "manchester united", "manchester utd", "united"]],
+["Man City", ["man city", "manchester city"]],
+["Man Utd", ["man utd", "man united", "manchester united", "manchester utd"]],
 ["Newcastle", ["newcastle", "newcastle united"]],
 ["Nott'm Forest", ["nott'm forest", "nottingham forest", "forest"]],
 ["Southampton", ["southampton", "saints"]],
@@ -608,6 +608,21 @@ function parseChatMessage(text, pendingTeam, defaultLeague) {
     }
     if (pendingTeam) {
       return { kind: "predict", home: pendingTeam, away: teams[0], league: league };
+    }
+    // One known team and a "vs" — the other side is a team the
+    // parser does not know ("Chelsea vs Leed united", where "Leed"
+    // is a typo for Leeds): send both sides and let the API resolve
+    // the unknown one or suggest the closest name, instead of
+    // asking "who are they playing?" when the user already named
+    // both teams. (Bare "city" / "united" are deliberately not team
+    // forms: "city" would claim Coventry City as Man City, and
+    // "united" claimed "Leed united" as Man Utd.) The split only
+    // counts when the known team is exactly one of the two sides —
+    // otherwise "head-to-head Arsenal" would split into nonsense.
+    var sides = chatSplitSides(normed);
+    if (sides && (chatNorm(sides[0]) === chatNorm(teams[0]) ||
+                  chatNorm(sides[1]) === chatNorm(teams[0]))) {
+      return { kind: "predict", home: sides[0], away: sides[1], league: league };
     }
     return { kind: "pending", team: teams[0] };
   }

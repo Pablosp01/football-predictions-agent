@@ -280,6 +280,104 @@ def test_team_falls_back_to_the_league_the_team_plays_in(client):
     assert body["league"] == "NL"
 
 
+def test_resolve_team_live_names():
+    """The live football-data.org names differ from the bundled
+    sample names ("Manchester City FC" vs "Man City"): the short
+    forms Vincent types must resolve to the live name when the
+    live list is in use."""
+    live = ["Manchester City FC", "Fulham FC", "Manchester United FC",
+            "Liverpool FC", "Arsenal FC", "Chelsea FC",
+            "Tottenham Hotspur FC", "Wolverhampton Wanderers FC",
+            "Nottingham Forest FC", "Brighton & Hove Albion FC",
+            "Leeds United FC", "Southampton FC"]
+    with patch.object(api, "_known_teams", lambda league: live):
+        assert api.resolve_team("Man City", "PL") == "Manchester City FC"
+        assert api.resolve_team("Man Utd", "PL") == "Manchester United FC"
+        assert api.resolve_team("Man United", "PL") == "Manchester United FC"
+        assert api.resolve_team("Spurs", "PL") == "Tottenham Hotspur FC"
+        assert api.resolve_team("Wolves", "PL") == "Wolverhampton Wanderers FC"
+        assert api.resolve_team("Nott'm Forest", "PL") == "Nottingham Forest FC"
+        assert api.resolve_team("Brighton", "PL") == "Brighton & Hove Albion FC"
+        assert api.resolve_team("Leeds", "PL") == "Leeds United FC"
+        assert api.resolve_team("Saints", "PL") == "Southampton FC"
+        assert api.resolve_team("City", "PL") == "Manchester City FC"
+        assert api.resolve_team("United", "PL") == "Manchester United FC"
+
+
+def test_predict_survives_a_rate_limited_league(client):
+    """The 2026-11-17 09:29 failure: a cold restart made the
+    fallback search fetch nine leagues at once, the free feed
+    capped at 10 requests a minute, and the 429 became an
+    unhandled 500 ("Something went wrong"). A league whose data
+    cannot be fetched is now skipped, and the request gets the
+    handled error for the league asked about instead."""
+    import requests
+
+    real_known = api._known_teams
+
+    def flaky_known(league):
+        if league == "EC":
+            raise requests.exceptions.HTTPError(
+                "429 Client Error: Too Many Requests")
+        return real_known(league)
+
+    with patch.object(api, "_known_teams", flaky_known):
+        r = client.post("/predict", json={"home_team": "Derby County",
+                                          "away_team": "Southampton",
+                                          "league": "PL"})
+        assert r.status_code == 400, r.text
+        assert "Unknown team" in r.json()["detail"]["error"]
+
+
+def test_get_predictor_rate_limit_is_a_503():
+    """A failed data fetch is a 503 with a plain message, never a 500."""
+    import requests
+    from fastapi import HTTPException as _HTTPException
+
+    class _FailingProvider:
+        def matches(self, league="PL"):
+            raise requests.exceptions.HTTPError("429 Client Error")
+        def fixtures(self, league="PL", on=None):
+            raise requests.exceptions.HTTPError("429 Client Error")
+
+    api.clear_cache()
+    with patch.object(api, "get_provider",
+                      lambda league="PL": _FailingProvider()):
+        with pytest.raises(_HTTPException) as exc:
+            api.get_predictor("PD")
+        assert exc.value.status_code == 503
+        assert "temporarily unavailable" in exc.value.detail["error"]
+
+
+def test_predict_falls_back_when_the_requested_league_feed_fails(client):
+    """A rate-limited feed for the league asked about must not 500:
+    the request falls back to a league whose data is cached and
+    predicts there."""
+    import requests
+
+    class _FailingProvider:
+        def matches(self, league="PL"):
+            raise requests.exceptions.HTTPError(
+                "429 Client Error: Too Many Requests")
+        def fixtures(self, league="PL", on=None):
+            raise requests.exceptions.HTTPError(
+                "429 Client Error: Too Many Requests")
+
+    real_provider = api.get_provider
+
+    def flaky_provider(league="PL"):
+        if league == "PD":
+            return _FailingProvider()
+        return real_provider(league)
+
+    with patch.object(api, "get_provider", flaky_provider):
+        r = client.post("/predict", json={"home_team": "Arsenal",
+                                          "away_team": "Chelsea",
+                                          "league": "PD"})
+        assert r.status_code == 200, r.text
+        assert r.json()["league"] == "PL"
+
+
 def test_team_unknown_everywhere_keeps_the_original_error(client):
     r = client.get("/team", params={"team": "Arsenl", "league": "PL"})
     assert r.status_code == 400, r.text
