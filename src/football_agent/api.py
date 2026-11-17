@@ -166,6 +166,49 @@ def resolve_team(name: str, league: str) -> str:
     })
 
 
+# Order to search when a team is not in the league asked for: the big
+# domestic leagues first, then the Champions League, then the
+# international pool (Nations League first — the chatbot's convention
+# for national teams). A club team also plays in its domestic league,
+# so domestic leagues come before the Champions League.
+_LEAGUE_SEARCH_ORDER = ["PL", "PD", "SA", "BL1", "FL1", "DED", "PPL",
+                        "BSA", "ELC", "CL", "NL", "WC", "EC"]
+
+
+def _resolve_team_quiet(name: str, league: str) -> str | None:
+    """resolve_team without raising: the canonical name, or None."""
+    try:
+        return resolve_team(name, league)
+    except HTTPException:
+        return None
+
+
+def resolve_team_anywhere(name: str, league: str) -> tuple[str, str]:
+    """Resolve a team name, searching every league.
+
+    Returns (canonical_name, league_found). The league asked for is
+    tried first; then the other leagues in _LEAGUE_SEARCH_ORDER.
+    Raises the asked-for league's 400 (with did_you_mean) when the
+    team is found nowhere — so a genuinely unknown name still gets
+    useful suggestions for the league asked about.
+
+    This is the chatbot trap fix: the chatbot inherits the Predict
+    tab's league, so "Arsenal's form" asked with the tab on the
+    Championship came back "Unknown team" — the model has Arsenal in
+    the Premier League, and the answer should come from there.
+    """
+    try:
+        return resolve_team(name, league), league
+    except HTTPException as first_error:
+        for other in _LEAGUE_SEARCH_ORDER:
+            if other == league:
+                continue
+            found = _resolve_team_quiet(name, other)
+            if found is not None:
+                return found, other
+        raise first_error
+
+
 # ---------------------------------------------------------------------------
 # Cached fitted model (fit once per league, reuse for every request)
 # ---------------------------------------------------------------------------
@@ -181,12 +224,18 @@ def get_predictor(league: str) -> Predictor:
         provider = get_provider(league)
         matches = provider.matches(league)
         if len(matches) < 10:
+            if os.environ.get("FOOTBALL_DATA_API_KEY"):
+                hint = (f"The live feed returned only {len(matches)} finished "
+                        f"matches for league '{league}'; the model needs at "
+                        "least 10 to fit.")
+            else:
+                hint = ("Set FOOTBALL_DATA_API_KEY for live data; the bundled sample "
+                        "data only covers the Premier League (PL) and the "
+                        "international tournaments (WC, EC, NL).")
             raise HTTPException(status_code=503, detail={
                 "error": f"Not enough historical matches to fit the model for league '{league}'",
                 "matches_available": len(matches),
-                "hint": ("Set FOOTBALL_DATA_API_KEY for live data; the bundled sample "
-                         "data only covers the Premier League (PL) and the "
-                         "international tournaments (WC, EC, NL)."),
+                "hint": hint,
             })
         _matches_cache[league] = matches
         if league in INTERNATIONAL_LEAGUES:
@@ -282,15 +331,49 @@ def _prediction_out(pred, league: str) -> PredictionOut:
 
 def _predict_one(home: str, away: str, league: str) -> PredictionOut:
     league = _require_known_league(league)
-    predictor = get_predictor(league)
-    home_c = resolve_team(home, league)
-    away_c = resolve_team(away, league)
+    try:
+        predictor = get_predictor(league)
+        home_c = resolve_team(home, league)
+        away_c = resolve_team(away, league)
+    except HTTPException as first_error:
+        # The league asked for cannot predict this pair: it may have
+        # too little history (the Championship), or the teams may play
+        # in another league (the chatbot inherits the Predict tab's
+        # league). Predict in the league the teams play in instead;
+        # if none works, the original error stands.
+        fallback = _predict_one_anywhere(home, away, league)
+        if fallback is not None:
+            return fallback
+        raise first_error
     if home_c == away_c:
         raise HTTPException(status_code=400, detail={
             "error": "Home and away teams must be different",
             "home_team": home_c, "away_team": away_c,
         })
     return _prediction_out(predictor.predict(home_c, away_c), league)
+
+
+def _predict_one_anywhere(home: str, away: str,
+                          requested_league: str) -> PredictionOut | None:
+    """Predict a pair in the first league where both teams play and
+    the model fits. Teams are resolved before fitting, so a league is
+    only fitted when both teams are in it. Returns None when no
+    league works."""
+    for league in _LEAGUE_SEARCH_ORDER:
+        if league == requested_league:
+            continue
+        home_c = _resolve_team_quiet(home, league)
+        if home_c is None:
+            continue
+        away_c = _resolve_team_quiet(away, league)
+        if away_c is None or away_c == home_c:
+            continue
+        try:
+            predictor = get_predictor(league)
+        except HTTPException:
+            continue
+        return _prediction_out(predictor.predict(home_c, away_c), league)
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -1036,7 +1119,12 @@ def predict_batch(req: BatchRequest) -> dict:
                for f in req.fixtures]
     results.sort(key=lambda r: r.confidence, reverse=True)
     ranked = [dict(r.model_dump(), rank=i + 1) for i, r in enumerate(results)]
-    return {"league": req.league, "count": len(ranked),
+    # The pairs may have been predicted in another league (a pair
+    # whose teams play elsewhere falls back there). The top-level
+    # league is the predictions' league when they all agree.
+    leagues = {r.league for r in results}
+    league = leagues.pop() if len(leagues) == 1 else req.league
+    return {"league": league, "count": len(ranked),
             "predictions": ranked, "source": "model",
             "disclaimer": DISCLAIMER}
 
@@ -1106,7 +1194,12 @@ def team_card(team: str, league: str = "PL") -> dict:
     get the same 400 + did_you_mean as /predict.
     """
     league = _require_known_league(league)
-    canonical = resolve_team(team, league)
+    try:
+        canonical = resolve_team(team, league)
+    except HTTPException:
+        # The team plays in another league (the chatbot inherits the
+        # Predict tab's league): answer from the league it plays in.
+        canonical, league = resolve_team_anywhere(team, league)
     predictor = get_predictor(league)
     played = [m for m in predictor.history
               if m.home_team == canonical or m.away_team == canonical]
@@ -1140,17 +1233,10 @@ def team_card(team: str, league: str = "PL") -> dict:
             "source": "model"}
 
 
-@app.get("/head-to-head", dependencies=[Depends(require_api_key)])
-def head_to_head_endpoint(home_team: str, away_team: str,
-                          league: str = "PL") -> dict:
-    """Last five meetings between two teams, newest first."""
-    league = _require_known_league(league)
-    home = resolve_team(home_team, league)
-    away = resolve_team(away_team, league)
-    if home == away:
-        raise HTTPException(status_code=400, detail={
-            "error": "Home and away teams must be different."})
-    predictor = get_predictor(league)
+def _head_to_head_result(home: str, away: str, predictor: Predictor,
+                         league: str) -> dict:
+    """The head-to-head response body for resolved teams and a fitted
+    predictor: the last five meetings, newest first, with the tally."""
     pair = {home, away}
     meetings = sorted(
         (m for m in predictor.history
@@ -1180,6 +1266,49 @@ def head_to_head_endpoint(home_team: str, away_team: str,
             "away_wins": aw,
             "data_as_of": last.isoformat() if last else None,
             "source": "model"}
+
+
+def _head_to_head_in_league(home_team: str, away_team: str,
+                            league: str) -> dict | None:
+    """Head-to-head in one league: None when the teams do not both
+    play there or the model cannot fit it."""
+    home = _resolve_team_quiet(home_team, league)
+    if home is None:
+        return None
+    away = _resolve_team_quiet(away_team, league)
+    if away is None or away == home:
+        return None
+    try:
+        predictor = get_predictor(league)
+    except HTTPException:
+        return None
+    return _head_to_head_result(home, away, predictor, league)
+
+
+@app.get("/head-to-head", dependencies=[Depends(require_api_key)])
+def head_to_head_endpoint(home_team: str, away_team: str,
+                          league: str = "PL") -> dict:
+    """Last five meetings between two teams, newest first."""
+    league = _require_known_league(league)
+    try:
+        home = resolve_team(home_team, league)
+        away = resolve_team(away_team, league)
+        if home == away:
+            raise HTTPException(status_code=400, detail={
+                "error": "Home and away teams must be different."})
+        predictor = get_predictor(league)
+    except HTTPException as first_error:
+        # The teams may play in another league (the chatbot inherits
+        # the Predict tab's league): answer from the league they play
+        # in. If none, the original error stands.
+        for other in _LEAGUE_SEARCH_ORDER:
+            if other == league:
+                continue
+            out = _head_to_head_in_league(home_team, away_team, other)
+            if out is not None:
+                return out
+        raise first_error
+    return _head_to_head_result(home, away, predictor, league)
 
 
 def _predict_fixtures(days_fixtures, league: str) -> list[dict]:
@@ -1235,6 +1364,13 @@ def fixtures(league: str = "PL",
         except ValueError:
             raise HTTPException(status_code=400, detail={
                 "error": f"Invalid date '{date}': use YYYY-MM-DD"})
+    canonical = None
+    if team:
+        # A team's fixtures only (e.g. its next match): find the team
+        # wherever it plays (the chatbot inherits the Predict tab's
+        # league) and fetch that league's fixtures. Unknown names get
+        # the same 400 + did_you_mean as /predict.
+        canonical, league = resolve_team_anywhere(team, league)
     provider = get_provider(league)
     espn_ok = False
     if os.environ.get("FOOTBALL_DATA_API_KEY"):
@@ -1249,11 +1385,8 @@ def fixtures(league: str = "PL",
         except Exception:
             days_fixtures = provider.fixtures(league, on)
     if team:
-        # A team's fixtures only (e.g. its next match): unknown names
-        # get the same 400 + did_you_mean as /predict. Fixture names
-        # are resolved first — ESPN says "Manchester City", the model
-        # knows "Man City".
-        canonical = resolve_team(team, league)
+        # Fixture names are resolved first — ESPN says "Manchester
+        # City", the model knows "Man City".
         kept = []
         for fx in days_fixtures:
             try:

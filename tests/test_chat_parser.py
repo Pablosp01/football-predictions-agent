@@ -62,6 +62,11 @@ CASES = [
     ["Who will win the Nations League?", None, "PL"],
     ["Today's Nations League matches", None, "PL"],
     ["Argentina vs Brazil world cup", None, "PL"],
+    # The parser passes the Predict tab's league through; the API
+    # finds the team in the league it plays in (the chatbot trap fix
+    # is server-side, not in the parser).
+    ["Arsenal's form", None, "ELC"],
+    ["Spain's form", None, "PL"],
 ]
 
 
@@ -87,6 +92,7 @@ def test_chat_parser_kinds():
         "ratings",
         "today",
         "predict",
+        "form", "form",
     ]
 
 
@@ -107,9 +113,19 @@ def test_chat_parser_fields():
                               ["Man Utd", "Liverpool"]]
     assert multi["league"] == "PL"
 
-    assert by_text["Arsenal's form"] == {
-        "kind": "form", "team": "Arsenal", "league": "PL"}
+    # "Arsenal's form" appears twice in CASES (PL and ELC tabs), so
+    # by_text keeps only the last one — assert by position instead.
+    assert results[8] == {"kind": "form", "team": "Arsenal",
+                          "league": "PL"}
     assert by_text["How is Liverpool doing?"]["team"] == "Liverpool"
+
+    # The parser passes the tab's league through unchanged — the
+    # server-side fallback finds the team in the league it plays in.
+    # (A single national team already infers NL in the parser.)
+    assert results[30] == {"kind": "form", "team": "Arsenal",
+                           "league": "ELC"}
+    assert results[31] == {"kind": "form", "team": "Spain",
+                           "league": "NL"}
 
     assert by_text["Who will win the Premier League?"] == {
         "kind": "ratings", "league": "PL"}

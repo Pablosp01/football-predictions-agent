@@ -162,7 +162,9 @@
     <p class="note">Type the way you would in a chat — nicknames work (“Man Utd”, “Spurs”).
       You can also ask for today’s or tomorrow’s matches, several matches at once,
       a team’s form, head to head, or who will win the league.
-      The league follows the selection in the Predict tab, or name it in your message.
+      Name a league in your message to pick one (“today’s La Liga matches”).
+      Otherwise I find the teams wherever they play — the Predict tab’s league
+      only decides “who will win the league” when you don’t name one.
       Two national teams (“Iceland vs Luxembourg”) predict as the Nations League
       automatically.</p>
   </section>
@@ -475,7 +477,9 @@ function chatIsIntlTeam(name) {
 
 // The league for a message: a league named in the message wins; two
 // national teams predict as the Nations League (NL) unless a league
-// was named; otherwise the Predict tab's dropdown wins.
+// was named; otherwise the Predict tab's dropdown is the first league
+// tried — the API then finds the teams in the league they play in
+// when they are not in that one.
 function chatLeagueFor(teams, namedLeague, defaultLeague) {
   if (namedLeague) return namedLeague;
   var allIntl = teams.length > 0 && teams.every(function (t) {
@@ -517,7 +521,8 @@ function chatSplitSides(normed) {
 //   {kind: "ratings", league} | {kind: "h2h", home, away, league} |
 //   {kind: "next", team, league}
 // "league" is the league named in the message, else the Nations League
-// for two national teams, else defaultLeague.
+// for two national teams, else defaultLeague. It is the first league
+// tried: the API falls back to the league the teams actually play in.
 function parseChatMessage(text, pendingTeam, defaultLeague) {
   var normed = chatNorm(text);
   var words = normed.split(" ").filter(function (w) { return w; });
@@ -971,7 +976,9 @@ function parseChatMessage(text, pendingTeam, defaultLeague) {
 
   // ------------------------------------------------------------------
   // Chatbot tab: type the way you would in a chat, get a prediction.
-  // The league follows the Predict tab's dropdown. Parsing is done by
+  // A league named in the message wins; otherwise the API finds the
+  // teams wherever they play (the Predict tab's dropdown is only the
+  // first league tried). Parsing is done by
   // the pure parseChatMessage() above; prediction rendering reuses
   // renderPrediction / loadBrief / renderError from the Predict tab.
   // ------------------------------------------------------------------
@@ -999,8 +1006,10 @@ function parseChatMessage(text, pendingTeam, defaultLeague) {
     "Nicknames work (“Man Utd”, “Spurs”). You can name one team and I’ll ask " +
     "who they’re playing. I also answer “today’s matches” and “tomorrow’s matches”, " +
     "several matches in one message, a team’s form, head to head, who will win " +
-    "the league, and a team’s next match. The league follows the selection in the " +
-    "Predict tab, or name it in your message (“today’s La Liga matches”).";
+    "the league, and a team’s next match. Name a league in your message to pick " +
+    "one (“today’s La Liga matches”); otherwise I find the teams wherever they " +
+    "play, and the Predict tab’s league only decides “who will win the league” " +
+    "when you don’t name one.";
 
   function addChatMsg(cls, html) { return addMsg(cls, html, chatLog); }
 
@@ -1039,16 +1048,6 @@ function parseChatMessage(text, pendingTeam, defaultLeague) {
         chatPredict(nextHome, nextAway, leagueSelect.value);
       }
     });
-    var detailObj = (detail && typeof detail === "object") ? detail : {};
-    if (detailObj.error && detailObj.error.indexOf("Unknown team") === 0 &&
-        leagueSelect.value !== "WC" && leagueSelect.value !== "EC" &&
-        leagueSelect.value !== "NL" &&
-        chatIsIntlTeam(home) && chatIsIntlTeam(away)) {
-      var tip = addChatMsg("agent",
-        "Those look like national teams — switch the league in the " +
-        "<b>Predict</b> tab to Nations League, World Cup or Euros, then ask again.");
-      void tip;
-    }
     return div;
   }
 
@@ -1263,7 +1262,7 @@ function parseChatMessage(text, pendingTeam, defaultLeague) {
       .then(function (resp) {
         status.remove();
         if (resp.ok) return resp.json().then(function (body) {
-          renderQuickList("Your matches — " + league, body.predictions);
+          renderQuickList("Your matches — " + (body.league || league), body.predictions);
         });
         return resp.json().catch(function () { return {}; }).then(function (body) {
           chatPredictError(pairs[0][0], pairs[0][1], body.detail || body);
@@ -1373,7 +1372,7 @@ function parseChatMessage(text, pendingTeam, defaultLeague) {
         addChatMsg("agent", "<b>" + esc(team) + "’s next match:</b> " +
           esc(fx.home_team) + " vs " + esc(fx.away_team) + " on " +
           esc(fx.date) + ".");
-        chatPredict(fx.home_team, fx.away_team, league);
+        chatPredict(fx.home_team, fx.away_team, body.league || league);
       });
   }
 

@@ -208,6 +208,122 @@ def test_predict_batch_ranked(client):
     assert [p["rank"] for p in body["predictions"]] == [1, 2]
 
 
+def test_predict_falls_back_to_the_league_the_teams_play_in(client):
+    """The chatbot trap: the chatbot inherits the Predict tab's
+    league, so a match asked with the tab on the wrong league came
+    back "Unknown team". The API now finds the teams in the league
+    they play in — Spain and France are in the international sample
+    only, so with the tab on PL they fall back to the Nations League."""
+    r = client.post("/predict", json={"home_team": "Spain",
+                                      "away_team": "France",
+                                      "league": "PL"})
+    assert r.status_code == 200, r.text
+    assert r.json()["league"] == "NL"
+
+
+def test_predict_fallback_keeps_the_original_error(client):
+    """A pair no league can predict keeps the error for the league
+    asked about — Derby County plays nowhere in the sample data."""
+    r = client.post("/predict", json={"home_team": "Derby County",
+                                      "away_team": "Southampton",
+                                      "league": "PL"})
+    assert r.status_code == 400, r.text
+    detail = r.json()["detail"]
+    assert "Unknown team" in detail["error"]
+    assert "Derby County" in detail["error"]
+
+
+def test_predict_fallback_when_the_league_cannot_fit(client):
+    """The reported bug, replayed: the Championship has too little
+    history to fit, so Arsenal vs Chelsea asked with the tab on ELC
+    must predict in the Premier League instead of failing — while a
+    pair that only plays in the Championship keeps the
+    Championship's own error."""
+    from fastapi import HTTPException as _HTTPException
+
+    real_known = api._known_teams
+    real_predictor = api.get_predictor
+
+    def fake_known(league):
+        if league == "ELC":
+            return ["Derby County", "Southampton"]
+        return real_known(league)
+
+    def fake_predictor(league):
+        if league == "ELC":
+            raise _HTTPException(status_code=503, detail={
+                "error": "Not enough historical matches to fit the model for league 'ELC'",
+                "matches_available": 6})
+        return real_predictor(league)
+
+    with patch.object(api, "_known_teams", fake_known), \
+         patch.object(api, "get_predictor", fake_predictor):
+        r = client.post("/predict", json={"home_team": "Arsenal",
+                                          "away_team": "Chelsea",
+                                          "league": "ELC"})
+        assert r.status_code == 200, r.text
+        assert r.json()["league"] == "PL"
+        r = client.post("/predict", json={"home_team": "Derby County",
+                                          "away_team": "Southampton",
+                                          "league": "ELC"})
+        assert r.status_code == 503, r.text
+        assert r.json()["detail"]["matches_available"] == 6
+
+
+def test_team_falls_back_to_the_league_the_team_plays_in(client):
+    """Spain's form asked with the tab on the Premier League must
+    answer from the Nations League, not "Unknown team"."""
+    r = client.get("/team", params={"team": "Spain", "league": "PL"})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["team"] == "Spain"
+    assert body["league"] == "NL"
+
+
+def test_team_unknown_everywhere_keeps_the_original_error(client):
+    r = client.get("/team", params={"team": "Arsenl", "league": "PL"})
+    assert r.status_code == 400, r.text
+    assert "Arsenal" in r.json()["detail"]["did_you_mean"]
+
+
+def test_head_to_head_falls_back_to_the_league_the_teams_play_in(client):
+    r = client.get("/head-to-head", params={"home_team": "Spain",
+                                            "away_team": "France",
+                                            "league": "PL"})
+    assert r.status_code == 200, r.text
+    assert r.json()["league"] == "NL"
+
+
+def test_predict_batch_league_follows_the_predictions(client):
+    """A batch asked with the tab on PL, of national-team pairs,
+    reports the Nations League, not the tab's league."""
+    r = client.post("/predict-batch", json={"fixtures": [
+        {"home_team": "Spain", "away_team": "France"},
+        {"home_team": "Germany", "away_team": "Netherlands"},
+    ], "league": "PL"})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["league"] == "NL"
+    assert all(p["league"] == "NL" for p in body["predictions"])
+
+
+def test_fixtures_team_filter_finds_the_team_in_another_league(client):
+    """Iceland's fixtures asked with the tab on PL must come from
+    the Nations League fixtures, not "Unknown team"."""
+    from football_agent.data.providers import clear_espn_cache
+    clear_espn_cache()
+    with patch("football_agent.data.providers.requests.get",
+               side_effect=_fake_espn_get):
+        r = client.get("/fixtures", params={"league": "PL", "team": "Iceland",
+                                            "date": "2026-11-16"})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["league"] == "NL"
+    assert len(body["fixtures"]) == 1
+    assert body["fixtures"][0]["home_team"] == "Iceland"
+    assert body["fixtures"][0]["prediction"] is not None
+
+
 def test_fixtures_sample_data_has_no_future_fixtures(client):
     # ESPN is the fixtures source when no data key is set; it says
     # there are no PL matches on 2026-11-15 (international break).
