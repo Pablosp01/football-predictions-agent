@@ -129,6 +129,44 @@ def test_predict_city_alias_still_man_city(client):
     assert r.json()["home_team"] == "Man City"
 
 
+def test_predict_same_team_400(client):
+    """A team against itself is not a match — including through an
+    alias ("City" and "Man City" are the same team)."""
+    r = client.post("/predict", json={"home_team": "Arsenal",
+                                      "away_team": "Arsenal"})
+    assert r.status_code == 400, r.text
+    assert "different" in r.json()["detail"]["error"]
+    r = client.post("/predict", json={"home_team": "City",
+                                      "away_team": "Man City"})
+    assert r.status_code == 400, r.text
+
+
+def test_resolve_team_word_match():
+    """Names whose words are not contiguous still resolve:
+    "Celta Vigo" -> "RC Celta de Vigo" (football-data.org's name).
+    Without this, Real Madrid vs Celta Vigo on 2026-11-21 had no
+    prediction at all."""
+    from football_agent import api
+    known = ["RC Celta de Vigo", "Real Madrid CF", "Sevilla FC"]
+    with patch.object(api, "_known_teams", lambda league: known):
+        assert api.resolve_team("Celta Vigo", "PD") == "RC Celta de Vigo"
+        assert api.resolve_team("Real Madrid", "PD") == "Real Madrid CF"
+
+
+def test_predict_fixtures_skips_same_team():
+    """A fixture listing the same team twice gets no prediction
+    (ESPN's "Alavés vs Deportivo" for 2026-11-21, both resolving to
+    Deportivo Alavés) — it is listed, not predicted."""
+    from datetime import date as _date
+    from football_agent.api import _predict_fixtures
+    from football_agent.data.types import Match
+    out = _predict_fixtures(
+        [Match(date=_date(2026, 11, 21), season="", league="PL",
+               home_team="Arsenal", away_team="Arsenal")], "PL")
+    assert len(out) == 1
+    assert out[0]["prediction"] is None
+
+
 def test_api_responses_are_not_cached(client):
     """Every answer is fresh: a deploy changes the answers, and a
     saved copy shows the old behaviour (the 2026-11-16 /today stale

@@ -140,6 +140,15 @@ def resolve_team(name: str, league: str) -> str:
     for normed, canonical in by_norm.items():
         if key and (key in normed or normed in key):
             return canonical
+    # Word match: every word of the name appears in the canonical
+    # name ("Celta Vigo" -> "RC Celta de Vigo", whose words are not
+    # contiguous). Only for multi-word names — a single word is too
+    # ambiguous ("Real" matches half the league).
+    key_words = set(key.split())
+    if len(key_words) > 1:
+        for normed, canonical in by_norm.items():
+            if key_words <= set(normed.split()):
+                return canonical
     # Aliases are exact only (line 136 above): a substring alias
     # ("city" for Man City) would otherwise claim any team whose name
     # contains it — "Coventry City" resolved to Man City, and the
@@ -1195,11 +1204,19 @@ def _predict_fixtures(days_fixtures, league: str) -> list[dict]:
             try:
                 home = resolve_team(fx.home_team, league)
                 away = resolve_team(fx.away_team, league)
-                pred = _prediction_out(
-                    predictor.predict(home, away, on=fx.date), league)
-                item["home_team"] = home
-                item["away_team"] = away
-                item["prediction"] = pred.model_dump()
+                if home == away:
+                    # Same team on both sides: bad feed data, never a
+                    # real match. Leave it unpredicted rather than
+                    # predicting a team against itself (ESPN listed
+                    # "Alavés vs Deportivo" for 2026-11-21, both
+                    # resolving to Deportivo Alavés).
+                    pass
+                else:
+                    pred = _prediction_out(
+                        predictor.predict(home, away, on=fx.date), league)
+                    item["home_team"] = home
+                    item["away_team"] = away
+                    item["prediction"] = pred.model_dump()
             except HTTPException:
                 pass
         out.append(item)
