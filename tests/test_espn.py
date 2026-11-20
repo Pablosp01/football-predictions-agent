@@ -9,7 +9,8 @@ from datetime import date, timedelta
 from unittest.mock import patch
 
 from football_agent.data.providers import (
-    EspnProvider, clear_espn_cache,
+    EspnHistoryProvider, EspnProvider, _espn_results, clear_espn_cache,
+    get_provider,
 )
 from football_agent.data.types import Match
 
@@ -136,3 +137,59 @@ def test_espn_transport_failure_raises():
         except ConnectionError:
             return
         raise AssertionError("expected the transport failure to raise")
+
+
+def _result_event(when, home, away, home_goals, away_goals):
+    ev = _event(when, "post", home, away)
+    ev["competitions"][0]["competitors"][0]["score"] = str(home_goals)
+    ev["competitions"][0]["competitors"][1]["score"] = str(away_goals)
+    return ev
+
+
+def test_espn_results_returns_only_finished_matches_with_scores():
+    """History: only state "post" events with both scores count.
+    Scheduled, live and scoreless finished events are not history."""
+    payload = {"events": [
+        _result_event("2026-11-08T20:00Z", "Pachuca", "Toluca", 2, 1),
+        _event("2026-11-08T22:00Z", "pre", "América", "Chivas"),
+        _event("2026-11-08T21:00Z", "in", "Cruz Azul", "Monterrey"),
+        _event("2026-11-08T18:00Z", "post", "Tigres", "León"),  # no scores
+    ]}
+    with patch("football_agent.data.providers.requests.get",
+               return_value=_FakeResponse(payload)):
+        out = _espn_results("mex.1", date(2026, 11, 8), "MX1")
+    assert len(out) == 1
+    assert out[0] == Match(date=date(2026, 11, 8), season="", league="MX1",
+                           home_team="Pachuca", away_team="Toluca",
+                           home_goals=2, away_goals=1)
+
+
+def test_espn_history_provider_sweeps_and_caches(tmp_path):
+    """matches() sweeps the past 21 scoreboard days and caches the
+    result on disk for 6 hours — the second call makes no requests."""
+    payload = {"events": [
+        _result_event("2026-11-08T20:00Z", "Pachuca", "Toluca", 2, 1),
+    ]}
+    calls = {"n": 0}
+
+    def counting(url, timeout=None):
+        calls["n"] += 1
+        return _FakeResponse(payload)
+
+    provider = EspnHistoryProvider(cache_dir=tmp_path)
+    with patch("football_agent.data.providers.requests.get",
+               side_effect=counting):
+        first = provider.matches("MX1")
+        second = provider.matches("MX1")
+    assert len(first) == 21  # one finished match per swept day
+    assert first == second
+    assert calls["n"] == 21
+
+
+def test_get_provider_returns_espn_history_even_with_a_key(monkeypatch):
+    """The nine ESPN-history leagues have no football-data.org
+    coverage at all, so the key is irrelevant for them."""
+    monkeypatch.setenv("FOOTBALL_DATA_API_KEY", "dummy-key")
+    assert isinstance(get_provider("MX1"), EspnHistoryProvider)
+    assert isinstance(get_provider("MLS"), EspnHistoryProvider)
+    assert isinstance(get_provider("TUR"), EspnHistoryProvider)

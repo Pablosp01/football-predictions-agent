@@ -211,7 +211,22 @@ ESPN_LEAGUE_SLUGS = {
     "PL": "eng.1", "PD": "esp.1", "SA": "ita.1", "BL1": "ger.1",
     "FL1": "fra.1", "ELC": "eng.2", "DED": "ned.1", "PPL": "por.1",
     "BSA": "bra.1", "CL": "uefa.champions",
+    # Leagues football-data.org does not cover: fixtures and history
+    # both come from ESPN's free scoreboard (no key). Swiss Super
+    # League (sui.1) and Croatian HNL (cro.1) are NOT on ESPN's
+    # scoreboard at all — verified 2026-11-20 — so they are not here.
+    "MX1": "mex.1", "MLS": "usa.1", "RPL": "rus.1", "BL2": "ger.2",
+    "DEN": "den.1", "BEL": "bel.1", "J1": "jpn.1", "ARG": "arg.1",
+    "TUR": "tur.1",
 }
+# Leagues whose history comes from ESPN (no football-data.org
+# coverage): Liga MX, MLS, Russian PL, 2. Bundesliga, Danish
+# Superliga, Belgian Pro League, J1 League, Argentine Primera,
+# Turkish Süper Lig.
+ESPN_HISTORY_LEAGUES = {"MX1", "MLS", "RPL", "BL2", "DEN", "BEL",
+                        "J1", "ARG", "TUR"}
+ESPN_HISTORY_DAYS = 21
+ESPN_HISTORY_CACHE_TTL = timedelta(hours=6)
 ESPN_INTL_SLUGS = {
     "NL": ("uefa.nations",),
     "WC": ("fifa.world",),
@@ -266,6 +281,97 @@ def _espn_day(slug: str, on: date, league: str) -> list[Match]:
     return out
 
 
+def _espn_results(slug: str, on: date, league: str) -> list[Match]:
+    """One ESPN scoreboard day: finished matches with scores.
+
+    The mirror of _espn_day: only state "post" events count, and only
+    when both teams have a score (ESPN sometimes lists a finished
+    event without one). Raises on transport failure so the caller
+    can report the league as unavailable.
+    """
+    url = ("https://site.api.espn.com/apis/site/v2/sports/soccer/"
+           f"{slug}/scoreboard?dates={on.strftime('%Y%m%d')}")
+    resp = requests.get(url, timeout=15)
+    resp.raise_for_status()
+    out: list[Match] = []
+    for event in resp.json().get("events", []):
+        if event.get("status", {}).get("type", {}).get("state") != "post":
+            continue  # scheduled or live: not a finished match
+        comps = event.get("competitions", [{}])[0]
+        teams = comps.get("competitors", [])
+        home = next((t for t in teams if t.get("homeAway") == "home"),
+                    None)
+        away = next((t for t in teams if t.get("homeAway") == "away"),
+                    None)
+        if not home or not away:
+            continue
+        home_name = home.get("team", {}).get("displayName")
+        away_name = away.get("team", {}).get("displayName")
+        home_goals = home.get("score")
+        away_goals = away.get("score")
+        if not home_name or not away_name:
+            continue
+        if home_goals is None or away_goals is None:
+            continue
+        day = datetime.fromisoformat(
+            event["date"].replace("Z", "+00:00")).date()
+        out.append(Match(date=day, season="", league=league,
+                         home_team=home_name, away_team=away_name,
+                         home_goals=int(home_goals),
+                         away_goals=int(away_goals)))
+    return out
+
+
+class EspnHistoryProvider:
+    """History from ESPN's free scoreboard (no key) for leagues
+    football-data.org does not cover.
+
+    matches() sweeps the past ESPN_HISTORY_DAYS days of scoreboards
+    and keeps finished matches with scores, cached on disk for 6
+    hours like the football-data.org responses. The first fit for a
+    league pays ~21 scoreboard requests; after that the disk cache
+    serves fits until it expires. Render's filesystem survives
+    sleep/wake, so only a new deploy re-sweeps. Fixtures still come
+    from EspnProvider.
+    """
+
+    def __init__(self, cache_dir: str | Path | None = None):
+        self.cache_dir = Path(cache_dir or CACHE_DIR)
+        self.cache_dir.mkdir(parents=True, exist_ok=True)
+
+    def matches(self, league: str = "MX1") -> list[Match]:
+        slug = ESPN_LEAGUE_SLUGS.get(league)
+        if slug is None:
+            return []
+        cache_file = self.cache_dir / f"espn_history_{league}.json"
+        if cache_file.exists():
+            stamp = datetime.fromtimestamp(cache_file.stat().st_mtime)
+            if datetime.now() - stamp < ESPN_HISTORY_CACHE_TTL:
+                data = json.loads(cache_file.read_text(encoding="utf-8"))
+                return [Match(date=_parse_date(d["date"]), season="",
+                              league=league, home_team=d["home_team"],
+                              away_team=d["away_team"],
+                              home_goals=d["home_goals"],
+                              away_goals=d["away_goals"])
+                        for d in data]
+        out: list[Match] = []
+        today = date.today()
+        for i in range(1, ESPN_HISTORY_DAYS + 1):
+            out.extend(_espn_results(slug, today - timedelta(days=i),
+                                     league))
+        out.sort(key=lambda m: m.date)
+        cache_file.write_text(json.dumps([
+            {"date": m.date.isoformat(), "home_team": m.home_team,
+             "away_team": m.away_team, "home_goals": m.home_goals,
+             "away_goals": m.away_goals} for m in out]),
+            encoding="utf-8")
+        return out
+
+    def fixtures(self, league: str = "MX1",
+                 on: date | None = None) -> list[Match]:
+        return EspnProvider().fixtures(league, on)
+
+
 class EspnProvider:
     """Free ESPN scoreboard fixtures (no key) — fixtures only.
 
@@ -318,9 +424,17 @@ def get_provider(league: str = "PL") -> Provider:
     club leagues use the Premier League sample file. NL (Nations
     League) always uses the international sample pool: it is not a
     football-data.org competition, so no key can fetch its history.
+    The nine ESPN-history leagues (Liga MX, MLS, Russian PL,
+    2. Bundesliga, Danish Superliga, Belgian Pro League, J1,
+    Argentine Primera, Turkish Süper Lig) always use the ESPN
+    history provider: football-data.org does not cover them.
     """
     if league == "NL":
         return InternationalSampleProvider()
+    if league in ESPN_HISTORY_LEAGUES:
+        # No football-data.org coverage for these leagues at all, so
+        # the key is irrelevant here: history comes from ESPN.
+        return EspnHistoryProvider()
     if os.environ.get("FOOTBALL_DATA_API_KEY"):
         try:
             return FootballDataOrgProvider()

@@ -26,6 +26,13 @@ def _espn_event(when, state, home, away):
     }
 
 
+def _espn_result(when, home, away, home_goals, away_goals):
+    ev = _espn_event(when, "post", home, away)
+    ev["competitions"][0]["competitors"][0]["score"] = str(home_goals)
+    ev["competitions"][0]["competitors"][1]["score"] = str(away_goals)
+    return ev
+
+
 class _FakeEspnResponse:
     def __init__(self, payload):
         self._payload = payload
@@ -59,6 +66,17 @@ def _fake_espn_get(url, timeout=None):
         return _FakeEspnResponse({"events": [
             _espn_event("2026-11-16T19:45Z", "pre", "Leeds United",
                         "Norwich City"),
+        ]})
+    if "mex.1" in url and "dates=20261116" in url:
+        return _FakeEspnResponse({"events": [
+            _espn_event("2026-11-16T20:00Z", "pre", "Pachuca", "Toluca"),
+        ]})
+    if "mex.1" in url:
+        # Past days: finished Liga MX matches with scores, so the
+        # ESPN-history provider can fit MX1 (42 matches over 21 days).
+        return _FakeEspnResponse({"events": [
+            _espn_result("2026-11-08T20:00Z", "Pachuca", "Toluca", 2, 1),
+            _espn_result("2026-11-08T22:00Z", "Toluca", "América", 1, 0),
         ]})
     if "fifa.world" in url and "dates=20260719" in url:
         return _FakeEspnResponse({"events": [
@@ -219,6 +237,42 @@ def test_predict_falls_back_to_the_league_the_teams_play_in(client):
                                       "league": "PL"})
     assert r.status_code == 200, r.text
     assert r.json()["league"] == "NL"
+
+
+def test_predict_falls_back_to_espn_history_league(client):
+    """Vincent's rule: a prediction asked in any league searches
+    every league before answering — a Liga MX pair asked with the
+    tab on PL predicts in MX1, not "Unknown team"."""
+    from datetime import date as _date
+    from football_agent.data.types import Match as _Match
+    from football_agent.model.predict import Predictor as _Predictor
+    real_known = api._known_teams
+    real_predictor = api.get_predictor
+    history = ([_Match(date=_date(2026, 11, 8), season="", league="MX1",
+                       home_team="Pachuca", away_team="Toluca",
+                       home_goals=2, away_goals=1),
+                _Match(date=_date(2026, 11, 8), season="", league="MX1",
+                       home_team="Toluca", away_team="América",
+                       home_goals=1, away_goals=0)] * 6)
+    mx1_predictor = _Predictor().fit(history)
+
+    def fake_known(league):
+        if league == "MX1":
+            return ["Pachuca", "Toluca", "América"]
+        return real_known(league)
+
+    def fake_predictor(league):
+        if league == "MX1":
+            return mx1_predictor
+        return real_predictor(league)
+
+    with patch.object(api, "_known_teams", fake_known), \
+         patch.object(api, "get_predictor", fake_predictor):
+        r = client.post("/predict", json={"home_team": "Pachuca",
+                                          "away_team": "Toluca",
+                                          "league": "PL"})
+    assert r.status_code == 200, r.text
+    assert r.json()["league"] == "MX1"
 
 
 def test_predict_fallback_keeps_the_original_error(client):
@@ -589,19 +643,23 @@ def test_ratings_and_team_nations_league(client):
     assert r.json()["league"] == "NL"
 
 
-def test_today_searches_all_leagues(client):
+def test_today_searches_all_leagues(client, tmp_path, monkeypatch):
     """Today's prediction searches every league, not just the top
     ones: on Mon 16 Nov 2026 the Eredivisie and Championship also
     have a match. They have no prediction data yet (no key), so they
-    are listed as unavailable instead of silently dropped."""
+    are listed as unavailable instead of silently dropped. A Liga MX
+    match is predicted too — its history comes from ESPN, not the
+    football-data.org key."""
     from football_agent.data.providers import clear_espn_cache
+    monkeypatch.setattr("football_agent.data.providers.CACHE_DIR",
+                        tmp_path)
     clear_espn_cache()
     with patch("football_agent.data.providers.requests.get",
                side_effect=_fake_espn_get):
         r = client.get("/today", params={"date": "2026-11-16"})
     assert r.status_code == 200, r.text
     body = r.json()
-    assert [g["league"] for g in body["groups"]] == ["PL", "NL"]
+    assert [g["league"] for g in body["groups"]] == ["PL", "MX1", "NL"]
     pl = body["groups"][0]
     # The phantom Coventry fixture is dropped, not predicted as
     # Man City: only the real Arsenal vs Chelsea is listed.
@@ -609,6 +667,13 @@ def test_today_searches_all_leagues(client):
     assert pl["fixtures"][0]["home_team"] == "Arsenal"
     assert pl["fixtures"][0]["away_team"] == "Chelsea"
     assert pl["fixtures"][0]["prediction"] is not None
+    mx1 = body["groups"][1]
+    assert mx1["label"] == "Liga MX"
+    assert len(mx1["fixtures"]) == 1
+    assert mx1["fixtures"][0]["home_team"] == "Pachuca"
+    assert mx1["fixtures"][0]["away_team"] == "Toluca"
+    assert mx1["fixtures"][0]["prediction"] is not None
+    assert mx1["fixtures"][0]["prediction"]["league"] == "MX1"
     assert [u["league"] for u in body["unavailable"]] == ["ELC", "DED"]
     assert body["unavailable"][0] == {
         "league": "ELC", "label": "Championship", "fixtures": 1}

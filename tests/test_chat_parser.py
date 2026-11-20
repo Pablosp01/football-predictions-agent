@@ -72,6 +72,12 @@ CASES = [
     ["Man Utd vs Liverpool", None, "PL"],
     ["Man City vs Fulham", None, "PL"],
     ["Alavés vs RC Deportivo de La Coruña", None, "PD"],
+    # The nine ESPN-history leagues are nameable in chat too, and a
+    # pair from one of them parses via split sides — the API's
+    # all-league fallback finds the league they play in.
+    ["Today's Liga MX matches", None, "PL"],
+    ["Pachuca vs Toluca", None, "PL"],
+    ["Turkish league matches today", None, "PL"],
 ]
 
 
@@ -99,6 +105,7 @@ def test_chat_parser_kinds():
         "predict",
         "form", "form",
         "predict", "predict", "predict", "predict", "predict",
+        "today", "predict", "today",
     ]
 
 
@@ -203,3 +210,16 @@ def test_chat_parser_fields():
     assert by_text["Argentina vs Brazil world cup"] == {
         "kind": "predict", "home": "Argentina", "away": "Brazil",
         "league": "WC"}
+
+    # The nine ESPN-history leagues are nameable in chat: "Liga MX"
+    # and "Turkish league" resolve to MX1 and TUR with the league
+    # named. A pair from one of them (Pachuca vs Toluca) parses via
+    # split sides with the tab's league — the API's all-league
+    # fallback finds MX1 from there.
+    liga_mx = by_text["Today's Liga MX matches"]
+    assert liga_mx["league"] == "MX1" and liga_mx["leagueNamed"] is True
+    assert by_text["Pachuca vs Toluca"] == {
+        "kind": "predict", "home": "pachuca", "away": "toluca",
+        "league": "PL"}
+    turkish = by_text["Turkish league matches today"]
+    assert turkish["league"] == "TUR" and turkish["leagueNamed"] is True

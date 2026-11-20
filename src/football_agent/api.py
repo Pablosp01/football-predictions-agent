@@ -41,8 +41,13 @@ MODEL_NAME = "Elo + Dixon-Coles Poisson"
 logger = logging.getLogger("football_agent.api")
 # Every football-data.org free-tier (TIER_ONE) competition, plus the
 # UEFA Nations League (NL) — not on football-data.org, it uses the
-# international sample pool and ESPN fixtures instead.
+# international sample pool and ESPN fixtures instead — plus the nine
+# ESPN-history leagues (MX1, MLS, RPL, BL2, DEN, BEL, J1, ARG, TUR):
+# not on football-data.org, fixtures and history both come from ESPN's
+# free scoreboard. Swiss Super League and Croatian HNL are not on
+# ESPN's scoreboard at all, so they are not here.
 LEAGUES = ["PL", "PD", "SA", "BL1", "FL1", "ELC", "DED", "PPL", "BSA",
+           "MX1", "MLS", "RPL", "BL2", "DEN", "BEL", "J1", "ARG", "TUR",
            "CL", "WC", "EC", "NL"]
 DISCLAIMER = (
     "Statistical model output, not betting advice. No guarantee of profit; "
@@ -233,7 +238,8 @@ def resolve_team(name: str, league: str) -> str:
 # for national teams). A club team also plays in its domestic league,
 # so domestic leagues come before the Champions League.
 _LEAGUE_SEARCH_ORDER = ["PL", "PD", "SA", "BL1", "FL1", "DED", "PPL",
-                        "BSA", "ELC", "CL", "NL", "WC", "EC"]
+                        "BSA", "ELC", "MX1", "MLS", "RPL", "BL2", "DEN",
+                        "BEL", "J1", "ARG", "TUR", "CL", "NL", "WC", "EC"]
 
 
 def _resolve_team_quiet(name: str, league: str) -> str | None:
@@ -589,6 +595,11 @@ _LEAGUE_NAMES = {
     "BSA": "Campeonato Brasileiro Série A", "CL": "Champions League",
     "WC": "FIFA World Cup", "EC": "European Championship",
     "NL": "UEFA Nations League",
+    "MX1": "Liga MX", "MLS": "Major League Soccer",
+    "RPL": "Russian Premier League", "BL2": "2. Bundesliga",
+    "DEN": "Danish Superliga", "BEL": "Belgian Pro League",
+    "J1": "J1 League", "ARG": "Argentine Primera División",
+    "TUR": "Turkish Süper Lig",
 }
 
 

@@ -1,5 +1,6 @@
-"""League coverage tests: all 13 competitions (12 free-tier + Nations
-League), plus the separate international (WC/EC/NL) rating pool.
+"""League coverage tests: all 22 competitions (12 free-tier + Nations
+League + 9 ESPN-history leagues), plus the separate international
+(WC/EC/NL) rating pool.
 
 Runs against the bundled offline sample data (FOOTBALL_DATA_API_KEY empty).
 """
@@ -13,8 +14,9 @@ os.environ.pop("API_KEY", None)
 
 from football_agent import api  # noqa: E402
 from football_agent.data.providers import (  # noqa: E402
-    FREE_TIER_COMPETITIONS, INTERNATIONAL_LEAGUES,
-    InternationalSampleProvider, SampleProvider, get_provider)
+    ESPN_HISTORY_LEAGUES, FREE_TIER_COMPETITIONS, INTERNATIONAL_LEAGUES,
+    EspnHistoryProvider, InternationalSampleProvider, SampleProvider,
+    get_provider)
 from football_agent.model.predict import Predictor  # noqa: E402
 
 
@@ -28,14 +30,20 @@ def client():
 
 def test_every_free_tier_competition_resolves():
     """All 12 free-tier codes are listed, named, and have a provider;
-    the Nations League (NL) is a 13th code on the international pool."""
-    assert len(api.LEAGUES) == 13
-    assert set(api.LEAGUES) == set(FREE_TIER_COMPETITIONS) | {"NL"}
+    the Nations League (NL) is a 13th code on the international pool,
+    and the 9 ESPN-history leagues are codes 14–22 on the ESPN
+    history provider."""
+    assert len(api.LEAGUES) == 22
+    assert set(api.LEAGUES) == (set(FREE_TIER_COMPETITIONS) | {"NL"}
+                                | ESPN_HISTORY_LEAGUES)
     for code, name in FREE_TIER_COMPETITIONS.items():
         assert api._LEAGUE_NAMES[code] == name
         provider = get_provider(code)
         assert provider is not None
     assert api._LEAGUE_NAMES["NL"] == "UEFA Nations League"
+    for code in ESPN_HISTORY_LEAGUES:
+        assert api._LEAGUE_NAMES[code]
+        assert isinstance(get_provider(code), EspnHistoryProvider)
     # Internationals get their own provider; clubs get the sample one.
     assert isinstance(get_provider("WC"), InternationalSampleProvider)
     assert isinstance(get_provider("EC"), InternationalSampleProvider)
@@ -44,11 +52,18 @@ def test_every_free_tier_competition_resolves():
     assert isinstance(get_provider("PD"), SampleProvider)
 
 
-def test_health_lists_all_thirteen(client):
+def test_search_order_covers_every_league():
+    """A prediction asked in any league searches every league before
+    answering — the fallback order must cover all 22 codes."""
+    assert set(api._LEAGUE_SEARCH_ORDER) == set(api.LEAGUES)
+    assert len(api._LEAGUE_SEARCH_ORDER) == 22
+
+
+def test_health_lists_all_twenty_two(client):
     r = client.get("/health")
     assert r.status_code == 200
     assert r.json()["leagues"] == api.LEAGUES
-    assert len(r.json()["leagues"]) == 13
+    assert len(r.json()["leagues"]) == 22
 
 
 def test_international_sample_loads():
