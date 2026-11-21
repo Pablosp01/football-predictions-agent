@@ -512,7 +512,9 @@ def _predict_one_anywhere(home: str, away: str,
 #     path that unblocks the live briefing).
 #   AGENTROUTER_API_KEY — free AgentRouter key, the fallback
 #     summariser when no OpenAI key is set.
-#   XINGCHI_API_KEY — pay-as-you-go Xingchi key, the last resort.
+#   XINGCHI_API_KEY — pay-as-you-go Xingchi key, the next fallback.
+#   OPENROUTER_API_KEY — Vincent's free OpenRouter key, the last
+#     resort (added 2026-11-21 at his request). Knowledge-only.
 # Without any key, /ai-brief answers 503 and the page hides the briefing.
 #
 # API shape (verified 2026-11-15 against the live key):
@@ -583,6 +585,28 @@ XINGCHI_FINGERPRINT_HEADERS = {
     "anthropic-version": "2023-06-01",
 }
 XINGCHI_TIMEOUT_S = 30
+
+# OpenRouter (Vincent's free key, added 2026-11-21 at his request —
+# "use your API on the site"): the last-resort summariser when the
+# other three fail. Plain /v1/chat/completions, no fingerprint
+# headers; OpenRouter asks for a referer + title, which the site
+# supplies. Free tier: 50 free-model requests/day, no credits.
+# Verified live from Vesper's VM: the free web-search plugin needs
+# purchased credits (HTTP 402), so this leg is knowledge-only — the
+# same prompt as Xingchi, and the answer is labelled as such.
+# Default model nvidia/nemotron-3.5-super-vl:free answers (verified
+# 2026-11-21, valid JSON, honest empty lists rather than invented
+# injuries); it is a reasoning model, so max_tokens is high (2500)
+# — at 800 it was cut off mid-answer. The Gemma free models were
+# temporarily rate-limited upstream at the same time. Model is
+# overridable with OPENROUTER_BRIEF_MODEL.
+OPENROUTER_MODEL = os.environ.get(
+    "OPENROUTER_BRIEF_MODEL", "nvidia/nemotron-3.5-super-vl:free")
+OPENROUTER_CHAT_URL = "https://openrouter.ai/api/v1/chat/completions"
+OPENROUTER_TIMEOUT_S = 60
+OPENROUTER_MAX_TOKENS = 2500
+OPENROUTER_SITE_URL = "https://football-predictions-agent-agk8.onrender.com"
+OPENROUTER_SITE_TITLE = "Football Predictions Agent"
 
 _brief_cache: dict[tuple[str, str, str], tuple[float, dict]] = {}
 
@@ -1052,19 +1076,93 @@ def _summarise_with_xingchi(home: str, away: str, league: str,
     return parsed
 
 
+def _summarise_with_openrouter(home: str, away: str, league: str,
+                               api_key: str, timeout: float) -> dict:
+    """Ask OpenRouter (Vincent's free key) for the briefing.
+
+    Plain /v1/chat/completions on a free model, knowledge-only: the
+    free web-search plugin needs purchased credits (HTTP 402), so
+    there is no live search on this leg — the same knowledge prompt
+    as Xingchi, and the answer is labelled as such. The default
+    model is a reasoning model, so max_tokens is high (2500); at
+    800 tokens it was cut off mid-answer. Verified live 2026-11-21:
+    a complete, valid-JSON answer that leaves injuries/news empty
+    rather than inventing them.
+
+    Returns {"summary", "form", "injuries", "news", "sources": []}.
+    Raises _BriefError on any failure. The key is never logged.
+    """
+    today = _datetime.now(_timezone.utc).date().isoformat()
+    body = {
+        "model": OPENROUTER_MODEL,
+        "messages": [{"role": "user",
+                      "content": _brief_prompt_knowledge(
+                          home, away, league, today)}],
+        "max_tokens": OPENROUTER_MAX_TOKENS,
+    }
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+        "HTTP-Referer": OPENROUTER_SITE_URL,
+        "X-Title": OPENROUTER_SITE_TITLE,
+    }
+    try:
+        resp = requests.post(
+            OPENROUTER_CHAT_URL,
+            headers=headers,
+            json=body,
+            timeout=timeout,
+        )
+    except requests.exceptions.RequestException as exc:
+        raise _BriefError(f"OpenRouter request failed: {exc}") from exc
+    if resp.status_code != 200:
+        detail = _http_error_detail(resp)
+        logger.warning(
+            "OpenRouter HTTP %s: content-type=%s body-head=%r",
+            resp.status_code,
+            (getattr(resp, "headers", None) or {}).get("Content-Type", ""),
+            (resp.text or "")[:200])
+        raise _BriefError(
+            f"OpenRouter returned HTTP {resp.status_code}"
+            + (f": {detail}" if detail else "")
+        )
+    try:
+        data = resp.json()
+    except ValueError as exc:
+        body_text = resp.text or ""
+        logger.warning(
+            "OpenRouter unreadable response: status=%s content-type=%s "
+            "len=%s body-head=%r",
+            resp.status_code,
+            (getattr(resp, "headers", None) or {}).get("Content-Type", ""),
+            len(body_text), body_text[:300])
+        if not body_text.strip():
+            raise _BriefError("OpenRouter returned an empty response") from exc
+        raise _BriefError(
+            "OpenRouter returned an unreadable response") from exc
+    text = _extract_xingchi_text(data)
+    if not text:
+        raise _BriefError("OpenRouter returned no answer text")
+    parsed = _parse_briefing(text)
+    parsed["sources"] = []
+    return parsed
+
+
 def _build_brief(home: str, away: str, league: str,
                  agentrouter_key: str | None,
                  xingchi_key: str | None = None,
-                 openai_key: str | None = None) -> dict:
+                 openai_key: str | None = None,
+                 openrouter_key: str | None = None) -> dict:
     """Ask OpenAI first (live web search, unblocked from this
-    server); fall back to AgentRouter, then Xingchi.
+    server); fall back to AgentRouter, then Xingchi, then OpenRouter.
 
     Returns {"summary", "form", "injuries", "news", "sources",
     "live_search"} — live_search True with the cited sources when
-    OpenAI or AgentRouter answers, False with no sources when the
-    Xingchi knowledge-only fallback answers. Raises _BriefError on
-    any failure. Total wall-clock budget is BRIEF_TOTAL_BUDGET_S;
-    a fallback only runs if time is left in that budget.
+    OpenAI or AgentRouter answers, False with no sources when a
+    knowledge-only fallback (Xingchi or OpenRouter) answers. Raises
+    _BriefError on any failure. Total wall-clock budget is
+    BRIEF_TOTAL_BUDGET_S; a fallback only runs if time is left in
+    that budget.
 
     A fast, retryable AgentRouter failure (elapsed <
     AGENTROUTER_FAST_RETRY_S, e.g. a transient unreadable gateway
@@ -1097,7 +1195,8 @@ def _build_brief(home: str, away: str, league: str,
             parsed["live_search"] = True
             return parsed
         except _BriefError:
-            if not agentrouter_key and not xingchi_key:
+            if not agentrouter_key and not xingchi_key \
+                    and not openrouter_key:
                 raise
             # Otherwise fall through to AgentRouter.
     if agentrouter_key:
@@ -1132,16 +1231,29 @@ def _build_brief(home: str, away: str, league: str,
                     return parsed
                 except _BriefError:
                     pass
-            if not xingchi_key:
+            if not xingchi_key and not openrouter_key:
                 raise
-    if not xingchi_key:
+    if not xingchi_key and not openrouter_key:
         raise _BriefError("No AI briefing key is configured")
-    parsed = _summarise_with_xingchi(
-        home, away, league, xingchi_key,
-        _timeout(XINGCHI_TIMEOUT_S))
-    parsed["live_search"] = False
-    parsed["sources"] = []
-    return parsed
+    last_error: _BriefError | None = None
+    if xingchi_key:
+        try:
+            parsed = _summarise_with_xingchi(
+                home, away, league, xingchi_key,
+                _timeout(XINGCHI_TIMEOUT_S))
+            parsed["live_search"] = False
+            parsed["sources"] = []
+            return parsed
+        except _BriefError as exc:
+            last_error = exc
+    if openrouter_key:
+        parsed = _summarise_with_openrouter(
+            home, away, league, openrouter_key,
+            _timeout(OPENROUTER_TIMEOUT_S))
+        parsed["live_search"] = False
+        parsed["sources"] = []
+        return parsed
+    raise last_error  # Xingchi failed and no OpenRouter key set
 
 
 def clear_brief_cache() -> None:
@@ -1236,6 +1348,7 @@ def health() -> dict:
         ("openai", "OPENAI_API_KEY"),
         ("agentrouter", "AGENTROUTER_API_KEY"),
         ("xingchi", "XINGCHI_API_KEY"),
+        ("openrouter", "OPENROUTER_API_KEY"),
     ) if os.environ.get(env)]
     return {"status": "ok", "model": MODEL_NAME, "leagues": LEAGUES,
             "briefing": briefing}
@@ -1284,7 +1397,9 @@ def ai_brief(req: BriefRequest) -> BriefOut:
     the search call — knowledge-only answer, labelled as such); if
     that is blocked too and a Xingchi key is set, the briefing falls
     back to Xingchi's knowledge-only answer (live_search false, no
-    sources).
+    sources); if that fails too and an OpenRouter key is set, the
+    free OpenRouter model answers from knowledge (also live_search
+    false, no sources).
 
     Team names are used as given, so this works for any league. 503 if
     no key is set; 502 if all services fail or time out; never
@@ -1303,12 +1418,14 @@ def ai_brief(req: BriefRequest) -> BriefOut:
     openai_key = os.environ.get("OPENAI_API_KEY")
     agentrouter_key = os.environ.get("AGENTROUTER_API_KEY")
     xingchi_key = os.environ.get("XINGCHI_API_KEY")
-    if not openai_key and not agentrouter_key and not xingchi_key:
+    openrouter_key = os.environ.get("OPENROUTER_API_KEY")
+    if not openai_key and not agentrouter_key and not xingchi_key \
+            and not openrouter_key:
         raise HTTPException(status_code=503, detail={
             "error": "AI search is not configured",
-            "hint": "Set OPENAI_API_KEY, AGENTROUTER_API_KEY or "
-                    "XINGCHI_API_KEY on the server to enable the AI "
-                    "match briefing.",
+            "hint": "Set OPENAI_API_KEY, AGENTROUTER_API_KEY, "
+                    "XINGCHI_API_KEY or OPENROUTER_API_KEY on the "
+                    "server to enable the AI match briefing.",
         })
     key = (_norm(home), _norm(away), league)
     cached = _brief_cache.get(key)
@@ -1317,7 +1434,8 @@ def ai_brief(req: BriefRequest) -> BriefOut:
     try:
         parsed = _build_brief(home, away, league,
                               agentrouter_key, xingchi_key,
-                              openai_key=openai_key)
+                              openai_key=openai_key,
+                              openrouter_key=openrouter_key)
     except _BriefError as exc:
         raise HTTPException(status_code=502, detail={
             "error": "AI search is unavailable right now",

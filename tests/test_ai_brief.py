@@ -1,6 +1,6 @@
 """AI match briefing tests: POST /ai-brief, OpenAI primary (direct
-API, unblocked from Render) with an AgentRouter fallback and a
-Xingchi fallback.
+API, unblocked from Render) with AgentRouter, Xingchi and OpenRouter
+fallbacks.
 
 Live web search: the /v1/responses call carries the web_search tool and
 sources are extracted from the answer's markdown links and from the
@@ -8,8 +8,10 @@ web_search_call output items. If OpenAI fails and an AgentRouter key
 is set, the briefing falls back to AgentRouter's /v1/responses
 (gpt-5.6-sol); if that fails and a Xingchi key is set, the briefing
 falls back to Xingchi's /v1/chat/completions (gpt-6.1-sol,
-knowledge-only: live_search false, no sources). No real keys and no
-network: football_agent.api.requests.post (all three services) is
+knowledge-only: live_search false, no sources); if that fails and an
+OpenRouter key is set, the free OpenRouter model answers from
+knowledge (also live_search false, no sources). No real keys and no
+network: football_agent.api.requests.post (all four services) is
 patched.
 """
 import json
@@ -123,6 +125,8 @@ def _set_keys(monkeypatch, agentrouter=True, xingchi=True):
         monkeypatch.setenv("XINGCHI_API_KEY", "xingchi-test-key")
     else:
         monkeypatch.delenv("XINGCHI_API_KEY", raising=False)
+    # No test here sets an OpenRouter key unless it says so.
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
 
 
 def _post_brief(client):
@@ -445,6 +449,7 @@ def test_ai_brief_xingchi_only_key_uses_fallback(monkeypatch):
 def test_ai_brief_no_keys_503(monkeypatch):
     _set_keys(monkeypatch, agentrouter=False, xingchi=False)
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
     with _client() as client, patch(
             "football_agent.api.requests.post") as mock_post:
         r = _post_brief(client)
@@ -453,7 +458,88 @@ def test_ai_brief_no_keys_503(monkeypatch):
     assert "OPENAI_API_KEY" in r.json()["detail"]["hint"]
     assert "AGENTROUTER_API_KEY" in r.json()["detail"]["hint"]
     assert "XINGCHI_API_KEY" in r.json()["detail"]["hint"]
+    assert "OPENROUTER_API_KEY" in r.json()["detail"]["hint"]
     mock_post.assert_not_called()
+
+
+def _assert_knowledge_briefing_body(r):
+    """A knowledge-only fallback answer: same content, live_search
+    False, no sources."""
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert "good form" in body["summary"]
+    assert body["form"] == ["Arsenal: W W D W W", "Chelsea: W D W W L"]
+    assert body["injuries"] == ["Bukayo Saka (Arsenal) — hamstring, doubt"]
+    assert body["news"] == ["Chelsea welcome back their captain."]
+    assert body["live_search"] is False
+    assert body["sources"] == []
+    assert body["searched_at"]
+    return body
+
+
+def test_ai_brief_success_openrouter(monkeypatch):
+    """Only an OpenRouter key set: the free model answers from
+    knowledge — the call goes to openrouter.ai with the free model
+    and a high max_tokens (a reasoning model), plus the referer."""
+    monkeypatch.setenv("OPENROUTER_API_KEY", "openrouter-test-key")
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("AGENTROUTER_API_KEY", raising=False)
+    monkeypatch.delenv("XINGCHI_API_KEY", raising=False)
+    with _client() as client, patch(
+            "football_agent.api.requests.post",
+            side_effect=_dispatch({
+                api.OPENROUTER_CHAT_URL: _FakeResponse(
+                    200, FAKE_XINGCHI_OK),
+            })) as mock_post:
+        r = _post_brief(client)
+    _assert_knowledge_briefing_body(r)
+    assert mock_post.call_count == 1
+    assert mock_post.call_args[0][0] == api.OPENROUTER_CHAT_URL
+    body = mock_post.call_args[1]["json"]
+    assert body["model"] == api.OPENROUTER_MODEL
+    assert body["max_tokens"] == api.OPENROUTER_MAX_TOKENS
+    headers = mock_post.call_args[1]["headers"]
+    assert headers["Authorization"] == "Bearer openrouter-test-key"
+    assert headers["HTTP-Referer"] == api.OPENROUTER_SITE_URL
+
+
+def test_ai_brief_xingchi_failure_falls_back_to_openrouter(monkeypatch):
+    """Xingchi fails, OpenRouter answers from knowledge — the last
+    resort, so the briefing answers instead of erroring."""
+    _set_keys(monkeypatch, agentrouter=False, xingchi=True)
+    monkeypatch.setenv("OPENROUTER_API_KEY", "openrouter-test-key")
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    with _client() as client, patch(
+            "football_agent.api.requests.post",
+            side_effect=_dispatch({
+                api.XINGCHI_CHAT_URL: _FakeResponse(
+                    500, {"error": {"message": "gateway error"}}),
+                api.OPENROUTER_CHAT_URL: _FakeResponse(
+                    200, FAKE_XINGCHI_OK),
+            })) as mock_post:
+        r = _post_brief(client)
+    _assert_knowledge_briefing_body(r)
+    assert mock_post.call_count == 2
+    assert mock_post.call_args_list[0][0][0] == api.XINGCHI_CHAT_URL
+    assert mock_post.call_args_list[1][0][0] == api.OPENROUTER_CHAT_URL
+
+
+def test_ai_brief_openrouter_only_key_fails_502(monkeypatch):
+    """Only an OpenRouter key set and it refuses (402, as the paid
+    web-search plugin does on a free key): 502, one call only."""
+    monkeypatch.setenv("OPENROUTER_API_KEY", "openrouter-test-key")
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("AGENTROUTER_API_KEY", raising=False)
+    monkeypatch.delenv("XINGCHI_API_KEY", raising=False)
+    with _client() as client, patch(
+            "football_agent.api.requests.post",
+            side_effect=_dispatch({
+                api.OPENROUTER_CHAT_URL: _FakeResponse(
+                    402, {"error": {"message": "Insufficient credits"}}),
+            })) as mock_post:
+        r = _post_brief(client)
+    assert r.status_code == 502, r.text
+    assert mock_post.call_count == 1
 
 
 def test_ai_brief_success_openai(monkeypatch):
