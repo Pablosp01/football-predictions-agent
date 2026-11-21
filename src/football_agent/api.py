@@ -506,9 +506,14 @@ def _predict_one_anywhere(home: str, away: str,
 #
 # Needs keys on the server (either one enables the briefing, neither
 # is required for predictions):
-#   AGENTROUTER_API_KEY — free AgentRouter key, the primary summariser.
-#   XINGCHI_API_KEY — pay-as-you-go Xingchi key, the fallback only.
-# Without either, /ai-brief answers 503 and the page hides the briefing.
+#   OPENAI_API_KEY — Vincent's direct OpenAI key, the primary
+#     summariser when set (added 2026-11-21 at his request: the
+#     direct OpenAI API is not blocked from Render, so this is the
+#     path that unblocks the live briefing).
+#   AGENTROUTER_API_KEY — free AgentRouter key, the fallback
+#     summariser when no OpenAI key is set.
+#   XINGCHI_API_KEY — pay-as-you-go Xingchi key, the last resort.
+# Without any key, /ai-brief answers 503 and the page hides the briefing.
 #
 # API shape (verified 2026-11-15 against the live key):
 #   POST https://agentrouter.org/v1/responses
@@ -546,6 +551,18 @@ AGENTROUTER_TIMEOUT_S = 90
 # response) is retried once; a failure that took this long or more
 # has already spent the budget and is not retried.
 AGENTROUTER_FAST_RETRY_S = 30
+
+# Direct OpenAI (Vincent's key, 2026-11-21): the primary summariser
+# when OPENAI_API_KEY is set. api.openai.com is not blocked from
+# Render the way AgentRouter's gateway is, so this is the path that
+# unblocks the live briefing. Same /v1/responses shape as AgentRouter
+# (an OpenAI-compatible gateway), so the same prompt, web_search
+# tool, text extraction and source collection apply — but no
+# fingerprint headers: a plain Bearer key is all OpenAI needs.
+# Model is overridable with OPENAI_BRIEF_MODEL (default gpt-4o).
+OPENAI_MODEL = os.environ.get("OPENAI_BRIEF_MODEL", "gpt-4o")
+OPENAI_RESPONSES_URL = "https://api.openai.com/v1/responses"
+OPENAI_TIMEOUT_S = 90
 BRIEF_TOTAL_BUDGET_S = 95  # wall-clock budget for the whole briefing
 BRIEF_CACHE_TTL_S = 15 * 60  # save free-tier quota: one briefing per pair/15 min
 BRIEF_CACHE_MAX = 200
@@ -706,8 +723,9 @@ def _parse_briefing(text: str) -> dict:
             "form": [], "injuries": [], "news": []}
 
 
-def _extract_agentrouter_text(data: dict) -> str:
-    """Return the answer text from an AgentRouter /v1/responses body.
+def _extract_responses_text(data: dict) -> str:
+    """Return the answer text from a /v1/responses body (OpenAI or
+    AgentRouter — the same shape).
 
     Primary shape: top-level "output_text". Fallback: output[] items
     with content[] chunks of type "output_text".
@@ -869,7 +887,7 @@ def _summarise_with_agentrouter(home: str, away: str, league: str,
                 retryable=False) from exc
         raise _BriefError(
             "AgentRouter returned an unreadable response") from exc
-    text = _extract_agentrouter_text(data)
+    text = _extract_responses_text(data)
     if not text:
         logger.warning(
             "AgentRouter no answer text: top-level keys=%s output items=%s",
@@ -877,6 +895,79 @@ def _summarise_with_agentrouter(home: str, away: str, league: str,
             [it.get("type") for it in (data.get("output") or [])
              if isinstance(it, dict)] if isinstance(data, dict) else "?")
         raise _BriefError("AgentRouter returned no answer text")
+    parsed = _parse_briefing(text)
+    parsed["sources"] = _extract_sources(text, data)
+    return parsed
+
+
+def _summarise_with_openai(home: str, away: str, league: str,
+                           api_key: str, timeout: float) -> dict:
+    """Ask OpenAI directly (/v1/responses) for the briefing.
+
+    Same shape as the AgentRouter call — same prompt, same web_search
+    tool, same text/source extraction — but a plain Bearer key and
+    no fingerprint headers. This is the primary path when
+    OPENAI_API_KEY is set: api.openai.com is not blocked from
+    Render, so the live search works here where AgentRouter's
+    gateway answers with a web firewall page.
+
+    Returns {"summary", "form", "injuries", "news", "sources"}.
+    Raises _BriefError on any failure. The key is never logged.
+    """
+    today = _datetime.now(_timezone.utc).date().isoformat()
+    body = {
+        "model": OPENAI_MODEL,
+        "input": _brief_prompt(home, away, league, today),
+        "tools": [{"type": "web_search"}],
+    }
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+    }
+    try:
+        resp = requests.post(
+            OPENAI_RESPONSES_URL,
+            headers=headers,
+            json=body,
+            timeout=timeout,
+        )
+    except requests.exceptions.RequestException as exc:
+        raise _BriefError(f"OpenAI request failed: {exc}") from exc
+    if resp.status_code != 200:
+        detail = _http_error_detail(resp)
+        logger.warning(
+            "OpenAI HTTP %s: content-type=%s body-head=%r",
+            resp.status_code,
+            (getattr(resp, "headers", None) or {}).get("Content-Type", ""),
+            (resp.text or "")[:200])
+        raise _BriefError(
+            f"OpenAI returned HTTP {resp.status_code}"
+            + (f": {detail}" if detail else "")
+        )
+    try:
+        data = resp.json()
+    except ValueError as exc:
+        body_text = resp.text or ""
+        logger.warning(
+            "OpenAI unreadable response: status=%s content-type=%s "
+            "len=%s body-head=%r",
+            resp.status_code,
+            (getattr(resp, "headers", None) or {}).get("Content-Type", ""),
+            len(body_text), body_text[:300])
+        if not body_text.strip():
+            raise _BriefError(
+                "OpenAI returned an empty response",
+                retryable=False) from exc
+        raise _BriefError(
+            "OpenAI returned an unreadable response") from exc
+    text = _extract_responses_text(data)
+    if not text:
+        logger.warning(
+            "OpenAI no answer text: top-level keys=%s output items=%s",
+            sorted(data.keys()) if isinstance(data, dict) else type(data),
+            [it.get("type") for it in (data.get("output") or [])
+             if isinstance(it, dict)] if isinstance(data, dict) else "?")
+        raise _BriefError("OpenAI returned no answer text")
     parsed = _parse_briefing(text)
     parsed["sources"] = _extract_sources(text, data)
     return parsed
@@ -963,15 +1054,17 @@ def _summarise_with_xingchi(home: str, away: str, league: str,
 
 def _build_brief(home: str, away: str, league: str,
                  agentrouter_key: str | None,
-                 xingchi_key: str | None = None) -> dict:
-    """Ask AgentRouter first (live web search); fall back to Xingchi.
+                 xingchi_key: str | None = None,
+                 openai_key: str | None = None) -> dict:
+    """Ask OpenAI first (live web search, unblocked from this
+    server); fall back to AgentRouter, then Xingchi.
 
     Returns {"summary", "form", "injuries", "news", "sources",
     "live_search"} — live_search True with the cited sources when
-    AgentRouter answers, False with no sources when the Xingchi
-    knowledge-only fallback answers. Raises _BriefError on any
-    failure. Total wall-clock budget is BRIEF_TOTAL_BUDGET_S; the
-    fallback only runs if time is left in that budget.
+    OpenAI or AgentRouter answers, False with no sources when the
+    Xingchi knowledge-only fallback answers. Raises _BriefError on
+    any failure. Total wall-clock budget is BRIEF_TOTAL_BUDGET_S;
+    a fallback only runs if time is left in that budget.
 
     A fast, retryable AgentRouter failure (elapsed <
     AGENTROUTER_FAST_RETRY_S, e.g. a transient unreadable gateway
@@ -982,7 +1075,10 @@ def _build_brief(home: str, away: str, league: str,
     The exception is a firewall block: the search call is retried
     once WITHOUT the search tool (knowledge prompt), because the
     firewall may still let a plain call through, and a
-    knowledge-only briefing beats none.
+    knowledge-only briefing beats none. OpenAI is tried once only:
+    a direct API failure (bad key, rate limit) will not fix itself
+    on an immediate retry, so a failure falls straight through to
+    AgentRouter.
     """
     started = time.monotonic()
     deadline = started + BRIEF_TOTAL_BUDGET_S
@@ -993,6 +1089,17 @@ def _build_brief(home: str, away: str, league: str,
             raise _BriefError("AI search time budget exhausted")
         return min(cap, remaining)
 
+    if openai_key:
+        try:
+            parsed = _summarise_with_openai(
+                home, away, league, openai_key,
+                _timeout(OPENAI_TIMEOUT_S))
+            parsed["live_search"] = True
+            return parsed
+        except _BriefError:
+            if not agentrouter_key and not xingchi_key:
+                raise
+            # Otherwise fall through to AgentRouter.
     if agentrouter_key:
         try:
             parsed = _summarise_with_agentrouter(
@@ -1156,17 +1263,18 @@ def predict(req: PredictRequest) -> PredictionOut:
 @app.post("/ai-brief", response_model=BriefOut,
           dependencies=[Depends(require_api_key)])
 def ai_brief(req: BriefRequest) -> BriefOut:
-    """AI match briefing: live web search via AgentRouter, never
-    predictions. The AI searches the web for the fixture and cites
-    its sources. If AgentRouter's web firewall blocks the search
-    call from this server, it is retried once without the search
-    tool (knowledge-only answer, labelled as such); if that is
-    blocked too and a Xingchi key is set, the briefing falls back
-    to Xingchi's knowledge-only answer (live_search false, no
+    """AI match briefing: live web search, never predictions. The AI
+    searches the web for the fixture and cites its sources. OpenAI
+    (direct API) is tried first when OPENAI_API_KEY is set — it is
+    not blocked from this server. If it fails, AgentRouter is tried
+    (retried once without the search tool if its web firewall blocks
+    the search call — knowledge-only answer, labelled as such); if
+    that is blocked too and a Xingchi key is set, the briefing falls
+    back to Xingchi's knowledge-only answer (live_search false, no
     sources).
 
     Team names are used as given, so this works for any league. 503 if
-    neither key is set; 502 if both services fail or time out; never
+    no key is set; 502 if all services fail or time out; never
     500 and never hangs (95s total budget — the search itself is
     slow).
     """
@@ -1179,13 +1287,15 @@ def ai_brief(req: BriefRequest) -> BriefOut:
     if _norm(home) == _norm(away):
         raise HTTPException(status_code=400, detail={
             "error": "Home and away teams must be different"})
+    openai_key = os.environ.get("OPENAI_API_KEY")
     agentrouter_key = os.environ.get("AGENTROUTER_API_KEY")
     xingchi_key = os.environ.get("XINGCHI_API_KEY")
-    if not agentrouter_key and not xingchi_key:
+    if not openai_key and not agentrouter_key and not xingchi_key:
         raise HTTPException(status_code=503, detail={
             "error": "AI search is not configured",
-            "hint": "Set AGENTROUTER_API_KEY or XINGCHI_API_KEY on the server "
-                    "to enable the AI match briefing.",
+            "hint": "Set OPENAI_API_KEY, AGENTROUTER_API_KEY or "
+                    "XINGCHI_API_KEY on the server to enable the AI "
+                    "match briefing.",
         })
     key = (_norm(home), _norm(away), league)
     cached = _brief_cache.get(key)
@@ -1193,7 +1303,8 @@ def ai_brief(req: BriefRequest) -> BriefOut:
         return BriefOut(**cached[1])
     try:
         parsed = _build_brief(home, away, league,
-                              agentrouter_key, xingchi_key)
+                              agentrouter_key, xingchi_key,
+                              openai_key=openai_key)
     except _BriefError as exc:
         raise HTTPException(status_code=502, detail={
             "error": "AI search is unavailable right now",

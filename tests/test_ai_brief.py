@@ -1,13 +1,16 @@
-"""AI match briefing tests: POST /ai-brief, AgentRouter primary with a
+"""AI match briefing tests: POST /ai-brief, OpenAI primary (direct
+API, unblocked from Render) with an AgentRouter fallback and a
 Xingchi fallback.
 
 Live web search: the /v1/responses call carries the web_search tool and
 sources are extracted from the answer's markdown links and from the
-web_search_call output items. If AgentRouter fails and a Xingchi key is
-set, the briefing falls back to Xingchi's /v1/chat/completions
-(gpt-6.1-sol, knowledge-only: live_search false, no sources). No real
-keys and no network: football_agent.api.requests.post (both gateways)
-is patched.
+web_search_call output items. If OpenAI fails and an AgentRouter key
+is set, the briefing falls back to AgentRouter's /v1/responses
+(gpt-5.6-sol); if that fails and a Xingchi key is set, the briefing
+falls back to Xingchi's /v1/chat/completions (gpt-6.1-sol,
+knowledge-only: live_search false, no sources). No real keys and no
+network: football_agent.api.requests.post (all three services) is
+patched.
 """
 import json
 import os
@@ -441,14 +444,80 @@ def test_ai_brief_xingchi_only_key_uses_fallback(monkeypatch):
 
 def test_ai_brief_no_keys_503(monkeypatch):
     _set_keys(monkeypatch, agentrouter=False, xingchi=False)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     with _client() as client, patch(
             "football_agent.api.requests.post") as mock_post:
         r = _post_brief(client)
     assert r.status_code == 503, r.text
     assert "not configured" in r.json()["detail"]["error"]
+    assert "OPENAI_API_KEY" in r.json()["detail"]["hint"]
     assert "AGENTROUTER_API_KEY" in r.json()["detail"]["hint"]
     assert "XINGCHI_API_KEY" in r.json()["detail"]["hint"]
     mock_post.assert_not_called()
+
+
+def test_ai_brief_success_openai(monkeypatch):
+    """Only an OpenAI key set: the direct API answers with live
+    search — the call goes to api.openai.com, not AgentRouter,
+    carries the web_search tool, and needs no fingerprint headers."""
+    monkeypatch.setenv("OPENAI_API_KEY", "openai-test-key")
+    monkeypatch.delenv("AGENTROUTER_API_KEY", raising=False)
+    monkeypatch.delenv("XINGCHI_API_KEY", raising=False)
+    with _client() as client, patch(
+            "football_agent.api.requests.post",
+            side_effect=_dispatch({
+                api.OPENAI_RESPONSES_URL: _FakeResponse(
+                    200, FAKE_AGENTROUTER_OK),
+            })) as mock_post:
+        r = _post_brief(client)
+    _assert_briefing_body(r)
+    assert mock_post.call_count == 1
+    assert mock_post.call_args[0][0] == api.OPENAI_RESPONSES_URL
+    body = mock_post.call_args[1]["json"]
+    assert body["model"] == api.OPENAI_MODEL
+    assert body["tools"] == [{"type": "web_search"}]
+    headers = mock_post.call_args[1]["headers"]
+    assert headers["Authorization"] == "Bearer openai-test-key"
+    assert "User-Agent" not in headers
+
+
+def test_ai_brief_openai_failure_falls_back_to_agentrouter(monkeypatch):
+    """OpenAI fails once (no retry for a direct API failure), then
+    AgentRouter answers with live search."""
+    monkeypatch.setenv("OPENAI_API_KEY", "openai-test-key")
+    _set_key(monkeypatch)
+    monkeypatch.delenv("XINGCHI_API_KEY", raising=False)
+    with _client() as client, patch(
+            "football_agent.api.requests.post",
+            side_effect=_dispatch({
+                api.OPENAI_RESPONSES_URL: _FakeResponse(
+                    500, {"error": {"message": "server error"}}),
+                api.AGENTROUTER_RESPONSES_URL: _FakeResponse(
+                    200, FAKE_AGENTROUTER_OK),
+            })) as mock_post:
+        r = _post_brief(client)
+    _assert_briefing_body(r)
+    assert mock_post.call_count == 2
+    assert mock_post.call_args_list[0][0][0] == api.OPENAI_RESPONSES_URL
+    assert mock_post.call_args_list[1][0][0] == \
+        api.AGENTROUTER_RESPONSES_URL
+
+
+def test_ai_brief_openai_only_key_fails_502(monkeypatch):
+    """Only an OpenAI key set and OpenAI rejects it (401): 502, one
+    call only — a bad key is not retried."""
+    monkeypatch.setenv("OPENAI_API_KEY", "openai-test-key")
+    monkeypatch.delenv("AGENTROUTER_API_KEY", raising=False)
+    monkeypatch.delenv("XINGCHI_API_KEY", raising=False)
+    with _client() as client, patch(
+            "football_agent.api.requests.post",
+            side_effect=_dispatch({
+                api.OPENAI_RESPONSES_URL: _FakeResponse(
+                    401, {"error": {"message": "Incorrect API key"}}),
+            })) as mock_post:
+        r = _post_brief(client)
+    assert r.status_code == 502, r.text
+    assert mock_post.call_count == 1
 
 
 def test_ai_brief_agentrouter_fails_no_xingchi_key_502(monkeypatch):
