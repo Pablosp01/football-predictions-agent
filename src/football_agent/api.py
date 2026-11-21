@@ -1225,7 +1225,20 @@ async def _no_store(request, call_next):
 
 @app.get("/health")
 def health() -> dict:
-    return {"status": "ok", "model": MODEL_NAME, "leagues": LEAGUES}
+    """Liveness + which briefing keys are configured.
+
+    "briefing" lists only the NAMES of the AI keys that are set
+    (openai / agentrouter / xingchi) — never any key value — so a
+    missing key can be diagnosed from the outside without ever
+    exposing a secret.
+    """
+    briefing = [name for name, env in (
+        ("openai", "OPENAI_API_KEY"),
+        ("agentrouter", "AGENTROUTER_API_KEY"),
+        ("xingchi", "XINGCHI_API_KEY"),
+    ) if os.environ.get(env)]
+    return {"status": "ok", "model": MODEL_NAME, "leagues": LEAGUES,
+            "briefing": briefing}
 
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"

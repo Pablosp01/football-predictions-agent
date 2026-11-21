@@ -113,6 +113,33 @@ def test_health(client):
     assert "PL" in body["leagues"]
 
 
+def test_health_briefing_lists_configured_keys_only(monkeypatch):
+    """GET /health names which briefing keys are set — never values.
+
+    With only an OpenAI key set, the list is ["openai"]; the key
+    itself appears nowhere in the response.
+    """
+    monkeypatch.setenv("OPENAI_API_KEY", "openai-test-key")
+    monkeypatch.delenv("AGENTROUTER_API_KEY", raising=False)
+    monkeypatch.delenv("XINGCHI_API_KEY", raising=False)
+    with TestClient(api.app) as client:
+        r = client.get("/health")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["briefing"] == ["openai"]
+    assert "openai-test-key" not in r.text
+
+
+def test_health_briefing_empty_when_no_keys(monkeypatch):
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("AGENTROUTER_API_KEY", raising=False)
+    monkeypatch.delenv("XINGCHI_API_KEY", raising=False)
+    with TestClient(api.app) as client:
+        r = client.get("/health")
+    assert r.status_code == 200
+    assert r.json()["briefing"] == []
+
+
 def test_predict_arsenal_chelsea(client):
     r = client.post("/predict", json={"home_team": "Arsenal", "away_team": "Chelsea"})
     assert r.status_code == 200, r.text
